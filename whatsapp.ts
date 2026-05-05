@@ -2,9 +2,11 @@ import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
 
 // Inicializamos el bot con los permisos para Linux y guardando la sesión
+import puppeteer from 'puppeteer';
 const whatsappClient = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        executablePath: puppeteer.executablePath(),
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
