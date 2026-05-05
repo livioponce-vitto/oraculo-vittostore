@@ -1,11 +1,11 @@
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
 
-// Inicializamos el bot forzándolo a usar tu Google Chrome real
+// Inicializamos el bot con los permisos para Linux y guardando la sesión
 const whatsappClient = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
 
@@ -15,7 +15,6 @@ whatsappClient.on('qr', (qr) => {
     console.log('=========================================\n');
     qrcode.generate(qr, { small: true });
 });
-
 whatsappClient.on('ready', () => {
     console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
 });
