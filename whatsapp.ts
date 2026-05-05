@@ -1,10 +1,7 @@
+import puppeteer from 'puppeteer';
+process.env.PUPPETEER_EXECUTABLE_PATH = puppeteer.executablePath();
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
-
-// Inicializamos el bot con los permisos para Linux y guardando la sesión
-import puppeteer from 'puppeteer';
-// Forzar el path del ejecutable de Chrome para puppeteer-core (usado internamente por whatsapp-web.js)
-process.env.PUPPETEER_EXECUTABLE_PATH = puppeteer.executablePath();
 const whatsappClient = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
