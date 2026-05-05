@@ -1,0 +1,6 @@
+2026/05/05-15:40:45.530 1f14 Reusing MANIFEST D:\APP_VITTO_STORE\VITTOSTORE-ORACULO-BACKEND\.wwebjs_auth\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/05-15:40:45.530 1f14 Recovering log #387
+2026/05/05-15:40:45.537 1f14 Reusing old log D:\APP_VITTO_STORE\VITTOSTORE-ORACULO-BACKEND\.wwebjs_auth\session\Default\IndexedDB\https_web.whatsapp.com_0.indexeddb.leveldb/000387.log 
+2026/05/05-15:59:12.015 53c Level-0 table #404: started
+2026/05/05-15:59:12.193 53c Level-0 table #404: 954137 bytes OK
+2026/05/05-15:59:12.234 53c Delete type=0 #387
