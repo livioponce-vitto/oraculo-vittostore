@@ -217,7 +217,7 @@ const startWhatsappClient = async () => {
             keepAliveIntervalMs: 30000,
             syncFullHistory: false,
             fireInitQueries: false,
-            shouldIgnoreJid: (jid) => jid.endsWith('@g.us')
+            shouldIgnoreJid: (jid) => (jid ? jid.endsWith('@g.us') : false)
         });
 
         whatsappClient.ev.on('creds.update', () => {
