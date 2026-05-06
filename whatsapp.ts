@@ -55,39 +55,94 @@ const resolveChromeExecutablePath = () => {
     }
 };
 
-const executablePath = resolveChromeExecutablePath();
-const whatsappClient = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        executablePath,
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--single-process'
-        ]
+let whatsappClient: Client | null = null;
+
+let isWhatsappReady = false;
+
+const waitForWhatsappReady = async (timeoutMs = 45000) => {
+    if (isWhatsappReady) {
+        return;
     }
-});
 
-whatsappClient.on('qr', (qr) => {
-    console.log('\n=========================================');
-    console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
-    console.log('=========================================\n');
-    qrcode.generate(qr, { small: true });
-});
-whatsappClient.on('ready', () => {
-    console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
-});
+    const start = Date.now();
+    while (!isWhatsappReady && Date.now() - start < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
 
-whatsappClient.initialize();
+    if (!isWhatsappReady) {
+        throw new Error('Cliente de WhatsApp no esta listo. Verifica sesion activa o escaneo de QR.');
+    }
+};
+
+try {
+    const executablePath = resolveChromeExecutablePath();
+    whatsappClient = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            executablePath,
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process'
+            ]
+        }
+    });
+
+    whatsappClient.on('qr', (qr) => {
+        console.log('\n=========================================');
+        console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
+        console.log('=========================================\n');
+        qrcode.generate(qr, { small: true });
+    });
+
+    whatsappClient.on('ready', () => {
+        isWhatsappReady = true;
+        console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
+    });
+
+    whatsappClient.on('auth_failure', (msg) => {
+        isWhatsappReady = false;
+        console.error('[WhatsApp] ❌ Fallo de autenticacion:', msg);
+    });
+
+    whatsappClient.on('disconnected', (reason) => {
+        isWhatsappReady = false;
+        console.error('[WhatsApp] ⚠️ Cliente desconectado:', reason);
+    });
+
+    whatsappClient.initialize().catch((error) => {
+        isWhatsappReady = false;
+        console.error('[WhatsApp] ❌ Error inicializando cliente:', error);
+    });
+} catch (error) {
+    isWhatsappReady = false;
+    console.error('[WhatsApp] ❌ Inicializacion omitida por error:', error);
+}
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
     try {
-        const chatId = `${numero}@c.us`;
-        await whatsappClient.sendMessage(chatId, mensaje);
-        console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numero}`);
+        if (!whatsappClient) {
+            throw new Error('Cliente de WhatsApp no inicializado.');
+        }
+
+        await waitForWhatsappReady();
+        const state = await whatsappClient.getState();
+        if (state !== 'CONNECTED') {
+            throw new Error(`Cliente de WhatsApp no conectado (estado actual: ${state}).`);
+        }
+
+        const numeroNormalizado = numero.replace(/\D/g, '');
+        const numberId = await whatsappClient.getNumberId(numeroNormalizado);
+
+        if (!numberId?._serialized) {
+            throw new Error(`El numero ${numeroNormalizado} no tiene cuenta valida en WhatsApp.`);
+        }
+
+        await whatsappClient.sendMessage(numberId._serialized, mensaje);
+        console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
     } catch (error) {
         console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
     }
