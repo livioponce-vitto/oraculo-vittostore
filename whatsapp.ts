@@ -5,9 +5,102 @@ import makeWASocket, {
     WASocket
 } from '@whiskeysockets/baileys';
 
+const ignoredBaileysNoise = [
+    'failed to decrypt message',
+    'sent retry receipt',
+    'got history notification'
+];
+
+const shouldIgnoreBaileysLog = (args: unknown[]) => {
+    const text = args
+        .map((arg) => {
+            if (typeof arg === 'string') {
+                return arg;
+            }
+
+            try {
+                return JSON.stringify(arg);
+            } catch (_error) {
+                return String(arg);
+            }
+        })
+        .join(' ')
+        .toLowerCase();
+
+    return ignoredBaileysNoise.some((item) => text.includes(item));
+};
+
+const baileysLogger = {
+    level: 'error',
+    child: () => baileysLogger,
+    trace: (..._args: unknown[]) => undefined,
+    debug: (..._args: unknown[]) => undefined,
+    info: (..._args: unknown[]) => undefined,
+    warn: (...args: unknown[]) => {
+        if (!shouldIgnoreBaileysLog(args)) {
+            console.warn(...args);
+        }
+    },
+    error: (...args: unknown[]) => {
+        if (!shouldIgnoreBaileysLog(args)) {
+            console.error(...args);
+        }
+    },
+    fatal: (...args: unknown[]) => {
+        if (!shouldIgnoreBaileysLog(args)) {
+            console.error(...args);
+        }
+    }
+};
+
 let whatsappClient: WASocket | null = null;
 let isWhatsappReady = false;
 let hasAuthSignal = false;
+const MAX_PENDING_MESSAGES = 100;
+const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
+
+const sendMessageNow = async (numero: string, mensaje: string) => {
+    if (!whatsappClient) {
+        throw new Error('Cliente de WhatsApp no inicializado.');
+    }
+
+    const numeroNormalizado = numero.replace(/\D/g, '');
+    const chatId = `${numeroNormalizado}@s.whatsapp.net`;
+    await whatsappClient.sendMessage(chatId, { text: mensaje });
+    console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
+};
+
+const enqueuePendingMessage = (numero: string, mensaje: string) => {
+    if (pendingMessages.length >= MAX_PENDING_MESSAGES) {
+        pendingMessages.shift();
+    }
+
+    pendingMessages.push({ numero, mensaje, createdAt: Date.now() });
+    console.warn(`[WhatsApp] ⏳ Mensaje en cola. Pendientes: ${pendingMessages.length}`);
+};
+
+const flushPendingMessages = async () => {
+    if (!whatsappClient || !isWhatsappReady || pendingMessages.length === 0) {
+        return;
+    }
+
+    console.log(`[WhatsApp] ▶️ Enviando ${pendingMessages.length} mensaje(s) en cola...`);
+
+    while (pendingMessages.length > 0 && whatsappClient && isWhatsappReady) {
+        const next = pendingMessages.shift();
+        if (!next) {
+            break;
+        }
+
+        try {
+            await sendMessageNow(next.numero, next.mensaje);
+        } catch (error) {
+            console.error('[WhatsApp] ❌ Error enviando mensaje en cola:', error);
+            pendingMessages.unshift(next);
+            break;
+        }
+    }
+};
 
 const waitForWhatsappReady = async (timeoutMs = 45000) => {
     if (isWhatsappReady) {
@@ -32,13 +125,15 @@ const startWhatsappClient = async () => {
         whatsappClient = makeWASocket({
             auth: state,
             version,
+            logger: baileysLogger as any,
             printQRInTerminal: false,
             markOnlineOnConnect: false,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 30000,
             syncFullHistory: false,
-            fireInitQueries: false
+            fireInitQueries: false,
+            shouldIgnoreJid: (jid) => jid.endsWith('@g.us')
         });
 
         whatsappClient.ev.on('creds.update', saveCreds);
@@ -59,6 +154,7 @@ const startWhatsappClient = async () => {
                 hasAuthSignal = true;
                 isWhatsappReady = true;
                 console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
+                void flushPendingMessages();
             }
 
             if (connection === 'close') {
@@ -93,17 +189,12 @@ void startWhatsappClient();
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
     try {
-        if (!whatsappClient) {
-            throw new Error('Cliente de WhatsApp no inicializado.');
+        if (!whatsappClient || !isWhatsappReady) {
+            enqueuePendingMessage(numero, mensaje);
+            return;
         }
 
-        await waitForWhatsappReady();
-
-        const numeroNormalizado = numero.replace(/\D/g, '');
-        const chatId = `${numeroNormalizado}@s.whatsapp.net`;
-
-        await whatsappClient.sendMessage(chatId, { text: mensaje });
-        console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
+        await sendMessageNow(numero, mensaje);
     } catch (error) {
         console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
     }
