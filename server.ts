@@ -1,14 +1,65 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import { enviarMensajeWhatsApp, getWhatsAppHealth } from './whatsapp'; 
+import { enviarMensajeWhatsApp, getWhatsAppHealth } from './whatsapp';
 
 dotenv.config();
 
+// ─── CONFIGURACIÓN GLOBAL ─────────────────────────────────────────────────────
+// Edita aquí o define en .env para cambiar sin tocar lógica.
+
+/** Permalink de checkout directo al producto de alto ticket de VITTOSTORE. */
+const CHECKOUT_URL_LUXURY =
+  process.env.CHECKOUT_URL_LUXURY ?? 'https://vittostore.store/cart/51578668482848:1';
+
+/**
+ * Tiempo (en segundos) que debe haber pasado desde el abandono antes de disparar.
+ * También define la ventana de deduplicación: no se envía dos veces al mismo
+ * checkout dentro de este intervalo.
+ */
+const ABANDONED_CHECKOUT_TIMEOUT_S =
+  Number(process.env.ABANDONED_CHECKOUT_TIMEOUT_S ?? 3600);
+
+/**
+ * Canal de mensajería. Actualmente se usa Baileys (WhatsApp directo via QR).
+ * Si en el futuro migras a la API oficial de Meta, actualiza este valor y el
+ * módulo whatsapp.ts para reflejarlo.
+ */
+const WHATSAPP_API_ENDPOINT =
+  process.env.WHATSAPP_API_ENDPOINT ?? 'baileys://local';
+
+/**
+ * Construye el cuerpo del mensaje de recuperación con tono de lujo.
+ * Recibe el nombre del cliente y la URL de checkout a usar.
+ */
+const MESSAGE_TEMPLATE = (customerFirstName: string, checkoutUrl: string): string =>
+  `¡Hola ${customerFirstName}! 👋
+
+Tu Ritual Moliae te espera. ✨ Hemos reservado tu Set de Lujo para envío inmediato aquí:
+${checkoutUrl}
+
+¿Tuviste algún inconveniente con el pago o el envío? Responde este mensaje y te ayudo al instante. 🤝
+
+¡Quedo a tu disposición!`;
+
+// ─── ESTADO DE RECUPERACIÓN ───────────────────────────────────────────────────
+/**
+ * RECOVERY_STATUS_TRACKING: Map en memoria que actúa como registro de envíos.
+ * Clave: dedupeKey del checkout. Valor: timestamp del primer envío.
+ * Impide reenviar el mensaje al mismo cliente dentro de ABANDONED_CHECKOUT_TIMEOUT_S.
+ * En el futuro puedes reemplazar este Map por una tabla en base de datos
+ * para persistencia entre reinicios.
+ */
+const RECOVERY_STATUS_TRACKING = new Map<string, number>();
+
+// ─── APP ──────────────────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-const WEBHOOK_DEDUPE_WINDOW_MS = 60 * 60 * 1000;
-const processedCheckouts = new Map<string, number>();
+const WEBHOOK_DEDUPE_WINDOW_MS = ABANDONED_CHECKOUT_TIMEOUT_S * 1000;
+
+console.log(`[Config] CHECKOUT_URL_LUXURY     = ${CHECKOUT_URL_LUXURY}`);
+console.log(`[Config] ABANDONED_CHECKOUT_TIMEOUT_S = ${ABANDONED_CHECKOUT_TIMEOUT_S}s`);
+console.log(`[Config] WHATSAPP_API_ENDPOINT   = ${WHATSAPP_API_ENDPOINT}`);
 
 const normalizePhone = (raw: string) => {
   let cleaned = raw.replace(/\D/g, '');
@@ -50,18 +101,19 @@ const isValidRecoveryUrl = (value: unknown) => {
 const markAndCheckDuplicate = (key: string) => {
   const now = Date.now();
 
-  for (const [processedKey, timestamp] of processedCheckouts.entries()) {
+  // Limpia entradas expiradas del registro de recuperación.
+  for (const [trackedKey, timestamp] of RECOVERY_STATUS_TRACKING.entries()) {
     if (now - timestamp > WEBHOOK_DEDUPE_WINDOW_MS) {
-      processedCheckouts.delete(processedKey);
+      RECOVERY_STATUS_TRACKING.delete(trackedKey);
     }
   }
 
-  const existing = processedCheckouts.get(key);
+  const existing = RECOVERY_STATUS_TRACKING.get(key);
   if (existing && now - existing <= WEBHOOK_DEDUPE_WINDOW_MS) {
-    return true;
+    return true; // Ya se envió dentro de la ventana → duplicado.
   }
 
-  processedCheckouts.set(key, now);
+  RECOVERY_STATUS_TRACKING.set(key, now);
   return false;
 };
 
@@ -78,7 +130,12 @@ app.get('/health', (_req: Request, res: Response) => {
     ok: true,
     uptimeSeconds: Math.floor(process.uptime()),
     whatsapp: wa,
-    dedupeTrackedKeys: processedCheckouts.size,
+    recoveryTrackedKeys: RECOVERY_STATUS_TRACKING.size,
+    config: {
+      checkoutUrlLuxury: CHECKOUT_URL_LUXURY,
+      abandonedCheckoutTimeoutS: ABANDONED_CHECKOUT_TIMEOUT_S,
+      whatsappApiEndpoint: WHATSAPP_API_ENDPOINT
+    },
     timestamp: new Date().toISOString()
   });
 });
@@ -123,26 +180,16 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
         return res.status(200).send('Webhook procesado (numero invalido)');
       }
 
-     // 💣 MUNICIÓN DE CIERRE DE VENTAS
-      const recoveryLine = recoveryUrl
-        ? `Si solo te faltó tiempo, aquí tienes tu enlace seguro para finalizar ahora mismo en menos de 1 minuto:\n🛒 ${recoveryUrl}`
-        : 'Si quieres, te envío de inmediato un nuevo enlace de pago actualizado para que finalices tu compra sin fricción.';
+      // Usa la URL dinámica de Shopify si es válida; si no, cae al permalink de lujo.
+      const checkoutUrl = recoveryUrl ?? CHECKOUT_URL_LUXURY;
+      console.log(`🛒 URL de checkout a enviar: ${checkoutUrl}`);
 
-      const mensaje = `¡Hola ${firstName}! 👋 Soy del equipo de VITTOSTORE. 👑
+      const mensaje = MESSAGE_TEMPLATE(firstName, checkoutUrl);
 
-Noté que intentaste realizar una compra, pero el pedido quedó a medias. Como nuestro stock se está moviendo súper rápido hoy, te he separado los artículos de tu carrito por un par de horas para que no te los ganen. ⏳
-
-¿Tuviste algún inconveniente con el método de pago o tienes dudas con el envío? Responde a este mensaje y te ayudo de inmediato. 🤝
-
-    ${recoveryLine}
-
-¡Quedo a tu disposición!`;
-
-      // Disparamos el arma con el número corregido
       await enviarMensajeWhatsApp(numeroLimpio, mensaje);
       
     } else {
-        console.log('⚠️ No se envió WhatsApp (Falta número o es un carrito de prueba de $0).');
+      console.log('⚠️ No se envió WhatsApp (Falta número o es un carrito de prueba de $0).');
     }
 
     return res.status(200).send('Webhook procesado');

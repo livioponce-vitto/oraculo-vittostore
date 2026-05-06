@@ -60,6 +60,7 @@ let isWhatsappReady = false;
 let hasAuthSignal = false;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
+const AUTH_STATE_DIR = 'baileys_auth_info';
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
 
@@ -72,6 +73,23 @@ export const getWhatsAppHealth = () => ({
             : 0,
     lastReadyAt
 });
+
+const normalizePhoneForWhatsApp = (raw: string) => {
+    // Shopify puede enviar +569..., espacios o guiones.
+    const cleaned = String(raw || '').replace(/\+/g, '').replace(/\D/g, '');
+    return cleaned;
+};
+
+const buildWhatsAppJid = (raw: string) => {
+    const normalized = normalizePhoneForWhatsApp(raw);
+
+    if (!/^\d{11,15}$/.test(normalized)) {
+        throw new Error(`Numero invalido para WhatsApp: ${raw}`);
+    }
+
+    // En Baileys el JID correcto para usuario es @s.whatsapp.net.
+    return `${normalized}@s.whatsapp.net`;
+};
 
 const persistPendingMessages = async () => {
     try {
@@ -117,9 +135,19 @@ const sendMessageNow = async (numero: string, mensaje: string) => {
         throw new Error('Cliente de WhatsApp no inicializado.');
     }
 
-    const numeroNormalizado = numero.replace(/\D/g, '');
-    const chatId = `${numeroNormalizado}@s.whatsapp.net`;
-    await whatsappClient.sendMessage(chatId, { text: mensaje });
+    const numeroNormalizado = normalizePhoneForWhatsApp(numero);
+    const chatId = buildWhatsAppJid(numeroNormalizado);
+    const safeMessage = String(mensaje || '').trim();
+
+    if (!safeMessage) {
+        throw new Error('Mensaje vacio. Se cancela envio.');
+    }
+
+    if (!isWhatsappReady) {
+        throw new Error('Cliente no READY al intentar enviar.');
+    }
+
+    await whatsappClient.sendMessage(chatId, { text: safeMessage });
     console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
 };
 
@@ -175,7 +203,7 @@ const waitForWhatsappReady = async (timeoutMs = 45000) => {
 
 const startWhatsappClient = async () => {
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_STATE_DIR);
         const { version } = await fetchLatestBaileysVersion();
 
         whatsappClient = makeWASocket({
@@ -192,7 +220,10 @@ const startWhatsappClient = async () => {
             shouldIgnoreJid: (jid) => jid.endsWith('@g.us')
         });
 
-        whatsappClient.ev.on('creds.update', saveCreds);
+        whatsappClient.ev.on('creds.update', () => {
+            saveCreds();
+            console.log(`[WhatsApp] 💾 Sesion actualizada en ${AUTH_STATE_DIR}`);
+        });
 
         whatsappClient.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -229,7 +260,7 @@ const startWhatsappClient = async () => {
             }
         });
 
-        console.log('[WhatsApp] Inicializando cliente y esperando QR/autenticacion...');
+        console.log(`[WhatsApp] Inicializando cliente y esperando QR/autenticacion... (auth dir: ${AUTH_STATE_DIR})`);
 
         setTimeout(() => {
             if (!hasAuthSignal && !isWhatsappReady) {
@@ -249,12 +280,21 @@ void (async () => {
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
     try {
-        if (!whatsappClient || !isWhatsappReady) {
-            enqueuePendingMessage(numero, mensaje);
+        const numeroNormalizado = normalizePhoneForWhatsApp(numero);
+        const mensajeSimple = String(mensaje || '').trim();
+
+        if (!mensajeSimple) {
+            console.error('[WhatsApp] ❌ Mensaje vacio. No se envia.');
             return;
         }
 
-        await sendMessageNow(numero, mensaje);
+        if (!whatsappClient || !isWhatsappReady) {
+            enqueuePendingMessage(numeroNormalizado, mensajeSimple);
+            return;
+        }
+
+        await waitForWhatsappReady(15000);
+        await sendMessageNow(numeroNormalizado, mensajeSimple);
     } catch (error) {
         console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
     }

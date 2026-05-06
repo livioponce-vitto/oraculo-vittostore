@@ -1,1 +1,8 @@
 node_modules
+.env
+baileys_auth_info/
+pending_messages.json
+.wwebjs_auth/
+.wwebjs_cache/
+Ayuda con Configuración de Cuenta - Google Gemini.html
+Ayuda con Configuración de Cuenta - Google Gemini_files/
