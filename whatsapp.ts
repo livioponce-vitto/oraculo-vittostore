@@ -98,6 +98,8 @@ try {
         console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
         console.log('=========================================\n');
         qrcode.generate(qr, { small: true });
+        console.log('[WhatsApp] QR (texto):', qr);
+        console.log('[WhatsApp] QR URL:', `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
     });
 
     whatsappClient.on('ready', () => {
@@ -114,6 +116,8 @@ try {
         isWhatsappReady = false;
         console.error('[WhatsApp] ⚠️ Cliente desconectado:', reason);
     });
+
+    console.log('[WhatsApp] Inicializando cliente y esperando QR/autenticacion...');
 
     whatsappClient.initialize().catch((error) => {
         isWhatsappReady = false;
