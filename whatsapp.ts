@@ -85,7 +85,9 @@ try {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
+                '--disable-extensions',
                 '--disable-gpu',
+                '--no-zygote',
                 '--single-process'
             ]
         }
