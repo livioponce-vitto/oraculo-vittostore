@@ -58,6 +58,7 @@ const resolveChromeExecutablePath = () => {
 let whatsappClient: Client | null = null;
 
 let isWhatsappReady = false;
+let hasAuthSignal = false;
 
 const waitForWhatsappReady = async (timeoutMs = 45000) => {
     if (isWhatsappReady) {
@@ -94,6 +95,7 @@ try {
     });
 
     whatsappClient.on('qr', (qr) => {
+        hasAuthSignal = true;
         console.log('\n=========================================');
         console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
         console.log('=========================================\n');
@@ -103,8 +105,22 @@ try {
     });
 
     whatsappClient.on('ready', () => {
+        hasAuthSignal = true;
         isWhatsappReady = true;
         console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
+    });
+
+    whatsappClient.on('authenticated', () => {
+        hasAuthSignal = true;
+        console.log('[WhatsApp] ✅ Sesion autenticada. Esperando estado ready...');
+    });
+
+    whatsappClient.on('loading_screen', (percent, message) => {
+        console.log(`[WhatsApp] Cargando WhatsApp Web: ${percent}% - ${message}`);
+    });
+
+    whatsappClient.on('change_state', (state) => {
+        console.log('[WhatsApp] Estado del cliente:', state);
     });
 
     whatsappClient.on('auth_failure', (msg) => {
@@ -123,6 +139,12 @@ try {
         isWhatsappReady = false;
         console.error('[WhatsApp] ❌ Error inicializando cliente:', error);
     });
+
+    setTimeout(() => {
+        if (!hasAuthSignal && !isWhatsappReady) {
+            console.error('[WhatsApp] ⚠️ No se recibio QR ni ready en 90s. Revisa memoria de Render, sesion LocalAuth y logs de loading_screen/change_state.');
+        }
+    }, 90000);
 } catch (error) {
     isWhatsappReady = false;
     console.error('[WhatsApp] ❌ Inicializacion omitida por error:', error);
