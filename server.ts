@@ -23,6 +23,30 @@ const normalizePhone = (raw: string) => {
 
 const isValidPhoneForWhatsApp = (phone: string) => /^\d{11,15}$/.test(phone);
 
+const isValidRecoveryUrl = (value: unknown) => {
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  // Evita links de pruebas/manuales que no abren checkout real.
+  const blockedSnippets = ['example.com', 'test-vittostore-recovery', '/test'];
+  if (blockedSnippets.some((snippet) => trimmed.toLowerCase().includes(snippet))) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:';
+  } catch (_error) {
+    return false;
+  }
+};
+
 const markAndCheckDuplicate = (key: string) => {
   const now = Date.now();
 
@@ -65,7 +89,8 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
 
     const firstName = body?.customer?.first_name || 'Cliente';
     const phone = body?.customer?.phone || body?.shipping_address?.phone || null;
-    const recoveryUrl = body?.abandoned_checkout_url || 'Sin URL';
+    const recoveryUrlRaw = body?.abandoned_checkout_url;
+    const recoveryUrl = isValidRecoveryUrl(recoveryUrlRaw) ? String(recoveryUrlRaw).trim() : null;
     const dedupeKey = String(
       body?.id ||
       body?.token ||
@@ -78,6 +103,10 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
     console.log('🛒 Webhook de carrito abandonado recibido:');
     console.log(`👤 Cliente: ${firstName}`);
     console.log(`📱 Teléfono detectado: ${phone}`);
+    console.log(`🔗 Recovery URL recibida: ${recoveryUrlRaw || 'N/A'}`);
+    if (!recoveryUrl) {
+      console.log('⚠️ Recovery URL inválida o de prueba. Se enviará mensaje sin link.');
+    }
     console.log(`🧩 Dedupe key: ${dedupeKey}`);
     console.log('==============================');
 
@@ -95,14 +124,17 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
       }
 
      // 💣 MUNICIÓN DE CIERRE DE VENTAS
+      const recoveryLine = recoveryUrl
+        ? `Si solo te faltó tiempo, aquí tienes tu enlace seguro para finalizar ahora mismo en menos de 1 minuto:\n🛒 ${recoveryUrl}`
+        : 'Si quieres, te envío de inmediato un nuevo enlace de pago actualizado para que finalices tu compra sin fricción.';
+
       const mensaje = `¡Hola ${firstName}! 👋 Soy del equipo de VITTOSTORE. 👑
 
 Noté que intentaste realizar una compra, pero el pedido quedó a medias. Como nuestro stock se está moviendo súper rápido hoy, te he separado los artículos de tu carrito por un par de horas para que no te los ganen. ⏳
 
 ¿Tuviste algún inconveniente con el método de pago o tienes dudas con el envío? Responde a este mensaje y te ayudo de inmediato. 🤝
 
-Si solo te faltó tiempo, aquí tienes tu enlace seguro para finalizar ahora mismo en menos de 1 minuto:
-🛒 ${recoveryUrl}
+    ${recoveryLine}
 
 ¡Quedo a tu disposición!`;
 
