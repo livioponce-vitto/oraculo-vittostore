@@ -1,8 +1,30 @@
 import puppeteer from 'puppeteer';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
+import fs from 'fs';
 
-const executablePath = puppeteer.executablePath();
+const resolveChromeExecutablePath = () => {
+    try {
+        return puppeteer.executablePath();
+    } catch (_error) {
+        const candidates = [
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium'
+        ];
+
+        for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+
+        throw new Error('No se encontro Chrome para Puppeteer. Verifica postinstall y PUPPETEER_CACHE_DIR en Render.');
+    }
+};
+
+const executablePath = resolveChromeExecutablePath();
 const whatsappClient = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
