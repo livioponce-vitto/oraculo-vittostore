@@ -26,6 +26,37 @@ const prisma = persistenceEnabled ? new PrismaClient() : null;
 
 let lastPersistenceError: string | null = null;
 
+const isPrismaUniqueViolation = (error: unknown) =>
+  error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+
+const safeUpsertRecoveryEvent = async (
+  client: PrismaClient,
+  args: Parameters<PrismaClient['recoveryEvent']['upsert']>[0]
+) => {
+  try {
+    return await client.recoveryEvent.upsert(args);
+  } catch (error) {
+    // Under heavy concurrency, two writers can still race on the same dedupeKey.
+    // If the row was created by another writer first, fallback to read + update.
+    if (!isPrismaUniqueViolation(error)) {
+      throw error;
+    }
+
+    const existing = await client.recoveryEvent.findUnique({
+      where: { dedupeKey: args.where.dedupeKey }
+    });
+
+    if (existing) {
+      return client.recoveryEvent.update({
+        where: { id: existing.id },
+        data: args.update
+      });
+    }
+
+    throw error;
+  }
+};
+
 const withPrisma = async <T>(operation: (client: PrismaClient) => Promise<T>) => {
   if (!prisma) {
     return undefined;
@@ -49,7 +80,7 @@ export const getRecoveryStoreHealth = () => ({
 
 export const recordRecoveryEvent = async (input: RecoveryEventWrite) => {
   return withPrisma(async (client) => {
-    const event = await client.recoveryEvent.upsert({
+    const event = await safeUpsertRecoveryEvent(client, {
       where: { dedupeKey: input.dedupeKey },
       update: {
         ...(input.phone !== undefined ? { phone: input.phone } : {}),
@@ -78,7 +109,7 @@ export const recordRecoveryEvent = async (input: RecoveryEventWrite) => {
 
 export const appendRecoveryLog = async (input: RecoveryLogWrite) => {
   return withPrisma(async (client) => {
-    const event = await client.recoveryEvent.upsert({
+    const event = await safeUpsertRecoveryEvent(client, {
       where: { dedupeKey: input.dedupeKey },
       update: {},
       create: {

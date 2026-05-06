@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
+import crypto from 'crypto';
 import {
   appendRecoveryLog,
   getRecoveryStoreHealth,
@@ -35,6 +36,7 @@ const WHATSAPP_API_ENDPOINT =
   process.env.WHATSAPP_API_ENDPOINT ?? 'baileys://local';
 const WA_RETRY_BASE_DELAY_MS = Number(process.env.WA_RETRY_BASE_DELAY_MS ?? 5000);
 const QUEUE_ALERT_THRESHOLD = Number(process.env.QUEUE_ALERT_THRESHOLD ?? 20);
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET ?? '';
 
 /**
  * Construye el cuerpo del mensaje de recuperación con tono de lujo.
@@ -84,6 +86,33 @@ console.log(`[Config] ABANDONED_CHECKOUT_TIMEOUT_S = ${ABANDONED_CHECKOUT_TIMEOU
 console.log(`[Config] WHATSAPP_API_ENDPOINT   = ${WHATSAPP_API_ENDPOINT}`);
 console.log(`[Config] WA_RETRY_BASE_DELAY_MS = ${WA_RETRY_BASE_DELAY_MS}ms`);
 console.log(`[Config] QUEUE_ALERT_THRESHOLD  = ${QUEUE_ALERT_THRESHOLD}`);
+
+type RequestWithRawBody = Request & { rawBody?: Buffer };
+
+const hasValidShopifyHmac = (req: RequestWithRawBody) => {
+  if (!SHOPIFY_WEBHOOK_SECRET) {
+    return false;
+  }
+
+  const hmacHeader = req.get('x-shopify-hmac-sha256');
+  if (!hmacHeader || !req.rawBody) {
+    return false;
+  }
+
+  const digest = crypto
+    .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+    .update(req.rawBody)
+    .digest('base64');
+
+  const headerBuffer = Buffer.from(hmacHeader, 'utf8');
+  const digestBuffer = Buffer.from(digest, 'utf8');
+
+  if (headerBuffer.length !== digestBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(headerBuffer, digestBuffer);
+};
 
 const normalizePhone = (raw: string) => {
   let cleaned = raw.replace(/\D/g, '');
@@ -313,7 +342,13 @@ const scheduleWhatsAppSend = (
 };
 
 app.use(cors());
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as RequestWithRawBody).rawBody = Buffer.from(buf);
+    }
+  })
+);
 
 app.get('/', (_req: Request, res: Response) => {
   res.type('text/plain').send('👑 El Oráculo de VITTOSTORE está en línea y operando.');
@@ -360,6 +395,11 @@ app.get('/health', (_req: Request, res: Response) => {
 
 app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
   try {
+    if (!hasValidShopifyHmac(req as RequestWithRawBody)) {
+      console.error('[Security] ❌ Firma HMAC inválida para webhook de Shopify.');
+      return res.status(401).send('Firma de webhook inválida');
+    }
+
     const body = req.body;
 
     const firstName = body?.customer?.first_name || 'Cliente';
