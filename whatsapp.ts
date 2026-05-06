@@ -33,7 +33,12 @@ const startWhatsappClient = async () => {
             auth: state,
             version,
             printQRInTerminal: false,
-            markOnlineOnConnect: false
+            markOnlineOnConnect: false,
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 30000,
+            syncFullHistory: false,
+            fireInitQueries: false
         });
 
         whatsappClient.ev.on('creds.update', saveCreds);
