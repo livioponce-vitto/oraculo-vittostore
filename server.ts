@@ -1,5 +1,3 @@
-import path from 'path';
-process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || path.join(process.cwd(), '.cache', 'puppeteer');
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';

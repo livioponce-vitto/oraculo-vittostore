@@ -1,62 +1,11 @@
-import puppeteer from 'puppeteer';
-import { Client, LocalAuth } from 'whatsapp-web.js';
-import qrcode from 'qrcode-terminal';
-import fs from 'fs';
-import path from 'path';
+import makeWASocket, {
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    useMultiFileAuthState,
+    WASocket
+} from '@whiskeysockets/baileys';
 
-const localPuppeteerCacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(process.cwd(), '.cache', 'puppeteer');
-process.env.PUPPETEER_CACHE_DIR = localPuppeteerCacheDir;
-
-const findChromeInLocalCache = () => {
-    const chromeRoot = path.join(localPuppeteerCacheDir, 'chrome');
-    if (!fs.existsSync(chromeRoot)) {
-        return null;
-    }
-
-    const buildDirs = fs.readdirSync(chromeRoot).sort().reverse();
-    for (const buildDir of buildDirs) {
-        const modernPath = path.join(chromeRoot, buildDir, 'chrome-linux64', 'chrome');
-        if (fs.existsSync(modernPath)) {
-            return modernPath;
-        }
-
-        const legacyPath = path.join(chromeRoot, buildDir, 'chrome-linux', 'chrome');
-        if (fs.existsSync(legacyPath)) {
-            return legacyPath;
-        }
-    }
-
-    return null;
-};
-
-const resolveChromeExecutablePath = () => {
-    const cachedChromePath = findChromeInLocalCache();
-    if (cachedChromePath) {
-        return cachedChromePath;
-    }
-
-    try {
-        return puppeteer.executablePath();
-    } catch (_error) {
-        const candidates = [
-            '/usr/bin/google-chrome-stable',
-            '/usr/bin/google-chrome',
-            '/usr/bin/chromium-browser',
-            '/usr/bin/chromium'
-        ];
-
-        for (const candidate of candidates) {
-            if (fs.existsSync(candidate)) {
-                return candidate;
-            }
-        }
-
-        throw new Error('No se encontro Chrome para Puppeteer. Verifica postinstall y PUPPETEER_CACHE_DIR en Render.');
-    }
-};
-
-let whatsappClient: Client | null = null;
-
+let whatsappClient: WASocket | null = null;
 let isWhatsappReady = false;
 let hasAuthSignal = false;
 
@@ -75,80 +24,67 @@ const waitForWhatsappReady = async (timeoutMs = 45000) => {
     }
 };
 
-try {
-    const executablePath = resolveChromeExecutablePath();
-    whatsappClient = new Client({
-        authStrategy: new LocalAuth(),
-        puppeteer: {
-            executablePath,
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-extensions',
-                '--disable-gpu',
-                '--no-zygote',
-                '--single-process'
-            ]
-        }
-    });
+const startWhatsappClient = async () => {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
+        const { version } = await fetchLatestBaileysVersion();
 
-    whatsappClient.on('qr', (qr) => {
-        hasAuthSignal = true;
-        console.log('\n=========================================');
-        console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
-        console.log('=========================================\n');
-        qrcode.generate(qr, { small: true });
-        console.log('[WhatsApp] QR (texto):', qr);
-        console.log('[WhatsApp] QR URL:', `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
-    });
+        whatsappClient = makeWASocket({
+            auth: state,
+            version,
+            printQRInTerminal: false,
+            markOnlineOnConnect: false
+        });
 
-    whatsappClient.on('ready', () => {
-        hasAuthSignal = true;
-        isWhatsappReady = true;
-        console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
-    });
+        whatsappClient.ev.on('creds.update', saveCreds);
 
-    whatsappClient.on('authenticated', () => {
-        hasAuthSignal = true;
-        console.log('[WhatsApp] ✅ Sesion autenticada. Esperando estado ready...');
-    });
+        whatsappClient.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-    whatsappClient.on('loading_screen', (percent, message) => {
-        console.log(`[WhatsApp] Cargando WhatsApp Web: ${percent}% - ${message}`);
-    });
+            if (qr) {
+                hasAuthSignal = true;
+                console.log('\n=========================================');
+                console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
+                console.log('=========================================\n');
+                console.log('[WhatsApp] QR (texto):', qr);
+                console.log('[WhatsApp] QR URL:', `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
+            }
 
-    whatsappClient.on('change_state', (state) => {
-        console.log('[WhatsApp] Estado del cliente:', state);
-    });
+            if (connection === 'open') {
+                hasAuthSignal = true;
+                isWhatsappReady = true;
+                console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
+            }
 
-    whatsappClient.on('auth_failure', (msg) => {
+            if (connection === 'close') {
+                isWhatsappReady = false;
+                const statusCode = Number((lastDisconnect?.error as any)?.output?.statusCode);
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
+                if (shouldReconnect) {
+                    console.log('[WhatsApp] Reintentando conexion...');
+                    void startWhatsappClient();
+                } else {
+                    console.error('[WhatsApp] Sesion cerrada. Se requiere nuevo escaneo QR.');
+                }
+            }
+        });
+
+        console.log('[WhatsApp] Inicializando cliente y esperando QR/autenticacion...');
+
+        setTimeout(() => {
+            if (!hasAuthSignal && !isWhatsappReady) {
+                console.error('[WhatsApp] ⚠️ No se recibio QR ni ready en 90s. Revisa logs y estado de red de Render.');
+            }
+        }, 90000);
+    } catch (error) {
         isWhatsappReady = false;
-        console.error('[WhatsApp] ❌ Fallo de autenticacion:', msg);
-    });
+        console.error('[WhatsApp] ❌ Error inicializando Baileys:', error);
+    }
+};
 
-    whatsappClient.on('disconnected', (reason) => {
-        isWhatsappReady = false;
-        console.error('[WhatsApp] ⚠️ Cliente desconectado:', reason);
-    });
-
-    console.log('[WhatsApp] Inicializando cliente y esperando QR/autenticacion...');
-
-    whatsappClient.initialize().catch((error) => {
-        isWhatsappReady = false;
-        console.error('[WhatsApp] ❌ Error inicializando cliente:', error);
-    });
-
-    setTimeout(() => {
-        if (!hasAuthSignal && !isWhatsappReady) {
-            console.error('[WhatsApp] ⚠️ No se recibio QR ni ready en 90s. Revisa memoria de Render, sesion LocalAuth y logs de loading_screen/change_state.');
-        }
-    }, 90000);
-} catch (error) {
-    isWhatsappReady = false;
-    console.error('[WhatsApp] ❌ Inicializacion omitida por error:', error);
-}
+void startWhatsappClient();
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
     try {
@@ -157,19 +93,11 @@ export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => 
         }
 
         await waitForWhatsappReady();
-        const state = await whatsappClient.getState();
-        if (state !== 'CONNECTED') {
-            throw new Error(`Cliente de WhatsApp no conectado (estado actual: ${state}).`);
-        }
 
         const numeroNormalizado = numero.replace(/\D/g, '');
-        const numberId = await whatsappClient.getNumberId(numeroNormalizado);
+        const chatId = `${numeroNormalizado}@s.whatsapp.net`;
 
-        if (!numberId?._serialized) {
-            throw new Error(`El numero ${numeroNormalizado} no tiene cuenta valida en WhatsApp.`);
-        }
-
-        await whatsappClient.sendMessage(numberId._serialized, mensaje);
+        await whatsappClient.sendMessage(chatId, { text: mensaje });
         console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
     } catch (error) {
         console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
