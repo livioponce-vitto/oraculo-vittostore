@@ -4,6 +4,8 @@ import makeWASocket, {
     useMultiFileAuthState,
     WASocket
 } from '@whiskeysockets/baileys';
+import { promises as fs } from 'fs';
+import path from 'path';
 
 const ignoredBaileysNoise = [
     'failed to decrypt message',
@@ -58,11 +60,57 @@ let isWhatsappReady = false;
 let hasAuthSignal = false;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
+const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
+let lastReadyAt: number | null = null;
 
 export const getWhatsAppHealth = () => ({
     ready: isWhatsappReady,
-    pendingMessages: pendingMessages.length
+    pendingMessages: pendingMessages.length,
+    oldestPendingAgeSeconds:
+        pendingMessages.length > 0
+            ? Math.floor((Date.now() - pendingMessages[0].createdAt) / 1000)
+            : 0,
+    lastReadyAt
 });
+
+const persistPendingMessages = async () => {
+    try {
+        await fs.writeFile(PENDING_MESSAGES_FILE, JSON.stringify(pendingMessages, null, 2), 'utf-8');
+    } catch (error) {
+        console.error('[WhatsApp] ❌ No se pudo persistir cola pendiente:', error);
+    }
+};
+
+const loadPendingMessages = async () => {
+    try {
+        const exists = await fs
+            .access(PENDING_MESSAGES_FILE)
+            .then(() => true)
+            .catch(() => false);
+
+        if (!exists) {
+            return;
+        }
+
+        const raw = await fs.readFile(PENDING_MESSAGES_FILE, 'utf-8');
+        const parsed = JSON.parse(raw) as Array<{ numero: string; mensaje: string; createdAt: number }>;
+
+        pendingMessages.length = 0;
+        for (const item of parsed.slice(-MAX_PENDING_MESSAGES)) {
+            if (!item?.numero || !item?.mensaje || !item?.createdAt) {
+                continue;
+            }
+
+            pendingMessages.push(item);
+        }
+
+        if (pendingMessages.length > 0) {
+            console.log(`[WhatsApp] ♻️ Cola recuperada desde disco. Pendientes: ${pendingMessages.length}`);
+        }
+    } catch (error) {
+        console.error('[WhatsApp] ❌ No se pudo cargar cola pendiente:', error);
+    }
+};
 
 const sendMessageNow = async (numero: string, mensaje: string) => {
     if (!whatsappClient) {
@@ -82,6 +130,7 @@ const enqueuePendingMessage = (numero: string, mensaje: string) => {
 
     pendingMessages.push({ numero, mensaje, createdAt: Date.now() });
     console.warn(`[WhatsApp] ⏳ Mensaje en cola. Pendientes: ${pendingMessages.length}`);
+    void persistPendingMessages();
 };
 
 const flushPendingMessages = async () => {
@@ -99,9 +148,11 @@ const flushPendingMessages = async () => {
 
         try {
             await sendMessageNow(next.numero, next.mensaje);
+            await persistPendingMessages();
         } catch (error) {
             console.error('[WhatsApp] ❌ Error enviando mensaje en cola:', error);
             pendingMessages.unshift(next);
+            await persistPendingMessages();
             break;
         }
     }
@@ -158,6 +209,7 @@ const startWhatsappClient = async () => {
             if (connection === 'open') {
                 hasAuthSignal = true;
                 isWhatsappReady = true;
+                lastReadyAt = Date.now();
                 console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
                 void flushPendingMessages();
             }
@@ -190,7 +242,10 @@ const startWhatsappClient = async () => {
     }
 };
 
-void startWhatsappClient();
+void (async () => {
+    await loadPendingMessages();
+    await startWhatsappClient();
+})();
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
     try {
