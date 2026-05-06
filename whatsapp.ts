@@ -2,8 +2,39 @@ import puppeteer from 'puppeteer';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
 import fs from 'fs';
+import path from 'path';
+
+const localPuppeteerCacheDir = process.env.PUPPETEER_CACHE_DIR || path.join(process.cwd(), '.cache', 'puppeteer');
+process.env.PUPPETEER_CACHE_DIR = localPuppeteerCacheDir;
+
+const findChromeInLocalCache = () => {
+    const chromeRoot = path.join(localPuppeteerCacheDir, 'chrome');
+    if (!fs.existsSync(chromeRoot)) {
+        return null;
+    }
+
+    const buildDirs = fs.readdirSync(chromeRoot).sort().reverse();
+    for (const buildDir of buildDirs) {
+        const modernPath = path.join(chromeRoot, buildDir, 'chrome-linux64', 'chrome');
+        if (fs.existsSync(modernPath)) {
+            return modernPath;
+        }
+
+        const legacyPath = path.join(chromeRoot, buildDir, 'chrome-linux', 'chrome');
+        if (fs.existsSync(legacyPath)) {
+            return legacyPath;
+        }
+    }
+
+    return null;
+};
 
 const resolveChromeExecutablePath = () => {
+    const cachedChromePath = findChromeInLocalCache();
+    if (cachedChromePath) {
+        return cachedChromePath;
+    }
+
     try {
         return puppeteer.executablePath();
     } catch (_error) {
