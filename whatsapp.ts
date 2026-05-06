@@ -297,5 +297,6 @@ export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => 
         await sendMessageNow(numeroNormalizado, mensajeSimple);
     } catch (error) {
         console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
+        throw error;
     }
 };

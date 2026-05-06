@@ -1,0 +1,45 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecoveryStatus {
+  queued
+  sent
+  failed
+  duplicate
+  skipped
+}
+
+model RecoveryEvent {
+  id           String         @id @default(cuid())
+  dedupeKey    String         @unique
+  phone        String?
+  customerName String?
+  checkoutUrl  String?
+  source       String         @default("shopify_checkout_webhook")
+  status       RecoveryStatus
+  attempts     Int            @default(0)
+  lastError    String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  sentAt       DateTime?
+  logs         RecoveryLog[]
+}
+
+model RecoveryLog {
+  id        String        @id @default(cuid())
+  eventId    String
+  level      String
+  stage      String
+  message    String
+  payload    Json?
+  createdAt  DateTime      @default(now())
+  event      RecoveryEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([eventId, createdAt])
+}
