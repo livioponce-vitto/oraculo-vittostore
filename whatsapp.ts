@@ -59,6 +59,11 @@ let hasAuthSignal = false;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 
+export const getWhatsAppHealth = () => ({
+    ready: isWhatsappReady,
+    pendingMessages: pendingMessages.length
+});
+
 const sendMessageNow = async (numero: string, mensaje: string) => {
     if (!whatsappClient) {
         throw new Error('Cliente de WhatsApp no inicializado.');
