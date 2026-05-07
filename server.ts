@@ -6,6 +6,7 @@ import {
   appendRecoveryLog,
   findRecoveryEventByDedupeKey,
   getRecoveryStoreHealth,
+  getPersistedTrackingSnapshot,
   PersistedRecoveryStatus,
   recordRecoveryEvent
 } from './recovery-store';
@@ -385,14 +386,32 @@ app.get('/', (_req: Request, res: Response) => {
   res.type('text/plain').send('👑 El Oráculo de VITTOSTORE está en línea y operando.');
 });
 
-app.get('/health', (_req: Request, res: Response) => {
+app.get('/health', async (_req: Request, res: Response) => {
   const wa = getWhatsAppHealth();
   const persistence = getRecoveryStoreHealth();
   const tracked = Array.from(MESSAGE_TRACKER.values());
-  const sentCount = tracked.filter((item) => item.status === 'sent').length;
-  const failedCount = tracked.filter((item) => item.status === 'failed').length;
-  const duplicateCount = tracked.filter((item) => item.status === 'duplicate').length;
-  const skippedCount = tracked.filter((item) => item.status === 'skipped').length;
+  const memorySnapshot = {
+    trackedKeys: MESSAGE_TRACKER.size,
+    sent: tracked.filter((item) => item.status === 'sent').length,
+    failed: tracked.filter((item) => item.status === 'failed').length,
+    duplicate: tracked.filter((item) => item.status === 'duplicate').length,
+    skipped: tracked.filter((item) => item.status === 'skipped').length
+  };
+
+  const persistedSnapshot = await getPersistedTrackingSnapshot();
+  const trackingSnapshot = persistedSnapshot
+    ? {
+        trackedKeys: persistedSnapshot.trackedKeys,
+        sent: persistedSnapshot.sent,
+        failed: persistedSnapshot.failed,
+        duplicate: persistedSnapshot.duplicate,
+        skipped: persistedSnapshot.skipped,
+        source: 'persistence'
+      }
+    : {
+        ...memorySnapshot,
+        source: 'memory'
+      };
 
   res.status(200).json({
     ok: true,
@@ -409,11 +428,12 @@ app.get('/health', (_req: Request, res: Response) => {
       alertThreshold: QUEUE_ALERT_THRESHOLD
     },
     tracking: {
-      trackedKeys: MESSAGE_TRACKER.size,
-      sent: sentCount,
-      failed: failedCount,
-      duplicate: duplicateCount,
-      skipped: skippedCount
+      trackedKeys: trackingSnapshot.trackedKeys,
+      sent: trackingSnapshot.sent,
+      failed: trackingSnapshot.failed,
+      duplicate: trackingSnapshot.duplicate,
+      skipped: trackingSnapshot.skipped,
+      source: trackingSnapshot.source
     },
     config: {
       checkoutUrlLuxury: CHECKOUT_URL_LUXURY,

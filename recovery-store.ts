@@ -78,6 +78,40 @@ export const getRecoveryStoreHealth = () => ({
   lastError: lastPersistenceError
 });
 
+export type PersistedTrackingSnapshot = {
+  trackedKeys: number;
+  queued: number;
+  sent: number;
+  failed: number;
+  duplicate: number;
+  skipped: number;
+};
+
+export const getPersistedTrackingSnapshot = async () => {
+  return withPrisma(async (client) => {
+    const grouped = await client.recoveryEvent.groupBy({
+      by: ['status'],
+      _count: { _all: true }
+    });
+
+    const snapshot: PersistedTrackingSnapshot = {
+      trackedKeys: 0,
+      queued: 0,
+      sent: 0,
+      failed: 0,
+      duplicate: 0,
+      skipped: 0
+    };
+
+    for (const row of grouped) {
+      snapshot[row.status] = row._count._all;
+      snapshot.trackedKeys += row._count._all;
+    }
+
+    return snapshot;
+  });
+};
+
 export const findRecoveryEventByDedupeKey = async (dedupeKey: string) => {
   return withPrisma(async (client) => {
     return client.recoveryEvent.findUnique({
