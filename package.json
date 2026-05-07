@@ -23,6 +23,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "link-preview-js": "^3.2.0",
     "tsx": "^4.21.0"
   },
   "devDependencies": {
