@@ -5,7 +5,13 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { createBaileysAuthStore, clearBaileysAuthStore } from './baileys-auth-store';
+import {
+    acquireBaileysSessionLease,
+    clearBaileysAuthStore,
+    createBaileysAuthStore,
+    releaseBaileysSessionLease,
+    renewBaileysSessionLease
+} from './baileys-auth-store';
 
 const ignoredBaileysNoise = [
     'failed to decrypt message',
@@ -99,9 +105,16 @@ let hasAuthSignal = false;
 let ownJidUser: string | null = null;
 let isStartingWhatsappClient = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
+let leaseRenewTimer: NodeJS.Timeout | null = null;
+let isRenewingWhatsappLease = false;
+let isWhatsappLeaseHeld = false;
 let reconnectAttempts = 0;
 const MAX_PENDING_MESSAGES = 100;
 const MAX_RECONNECT_DELAY_MS = 120000;
+const WHATSAPP_SESSION_LEASE_TTL_MS = Number(process.env.BAILEYS_SESSION_LEASE_TTL_MS ?? 120000);
+const WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS = Number(
+    process.env.BAILEYS_SESSION_LEASE_RENEW_INTERVAL_MS ?? 30000
+);
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
@@ -121,6 +134,7 @@ const normalizeJidUser = (jid: string | null | undefined) => {
 
 export const getWhatsAppHealth = () => ({
     ready: isWhatsappReady,
+    leaseHeld: isWhatsappLeaseHeld,
     reconnectAttempts,
     lastDisconnectCode,
     lastDisconnectAt,
@@ -293,6 +307,126 @@ const clearReconnectTimer = () => {
     reconnectScheduledAt = null;
 };
 
+const clearLeaseRenewTimer = () => {
+    if (!leaseRenewTimer) {
+        return;
+    }
+
+    clearInterval(leaseRenewTimer);
+    leaseRenewTimer = null;
+};
+
+const stopWhatsappClient = async (reason: string) => {
+    const currentClient = whatsappClient;
+
+    whatsappClient = null;
+    isWhatsappReady = false;
+    ownJidUser = null;
+
+    if (!currentClient) {
+        return;
+    }
+
+    try {
+        (currentClient as any).ev?.removeAllListeners?.();
+        (currentClient as any).end?.(undefined);
+    } catch (error) {
+        console.warn(`[WhatsApp] ⚠️ Error cerrando cliente (${reason}):`, error);
+    }
+};
+
+const releaseWhatsappSessionLease = async (reason: string) => {
+    clearLeaseRenewTimer();
+
+    if (!isWhatsappLeaseHeld) {
+        return;
+    }
+
+    isWhatsappLeaseHeld = false;
+
+    const released = await releaseBaileysSessionLease();
+    if (released) {
+        console.log(`[WhatsApp] 🔓 Lease de sesion liberado (${reason}).`);
+    }
+};
+
+const startWhatsappLeaseHeartbeat = () => {
+    if (!isWhatsappLeaseHeld || leaseRenewTimer) {
+        return;
+    }
+
+    leaseRenewTimer = setInterval(() => {
+        if (isRenewingWhatsappLease) {
+            return;
+        }
+
+        isRenewingWhatsappLease = true;
+
+        void (async () => {
+            try {
+                const renewed = await renewBaileysSessionLease(WHATSAPP_SESSION_LEASE_TTL_MS);
+
+                if (!renewed) {
+                    console.error('[WhatsApp] ❌ Lease de sesion perdido. Se detiene cliente para evitar doble inicializacion.');
+                    clearLeaseRenewTimer();
+                    isWhatsappLeaseHeld = false;
+                    await stopWhatsappClient('lease-lost');
+                    scheduleReconnect(WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
+                }
+            } catch (error) {
+                console.error('[WhatsApp] ⚠️ Error renovando lease de sesion:', error);
+            } finally {
+                isRenewingWhatsappLease = false;
+            }
+        })();
+    }, WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
+
+    (leaseRenewTimer as NodeJS.Timeout).unref?.();
+};
+
+const ensureWhatsappSessionLease = async () => {
+    if (isWhatsappLeaseHeld) {
+        return true;
+    }
+
+    const acquired = await acquireBaileysSessionLease(WHATSAPP_SESSION_LEASE_TTL_MS);
+    if (!acquired) {
+        console.warn('[WhatsApp] ⏸️ Otra instancia mantiene el lease de sesion. Se pospone la inicializacion local.');
+        return false;
+    }
+
+    isWhatsappLeaseHeld = true;
+    console.log('[WhatsApp] 🔐 Lease de sesion adquirido en PostgreSQL.');
+    startWhatsappLeaseHeartbeat();
+    return true;
+};
+
+let processExitHandlersRegistered = false;
+
+const registerProcessExitHandlers = () => {
+    if (processExitHandlersRegistered) {
+        return;
+    }
+
+    processExitHandlersRegistered = true;
+
+    const shutdown = (signal: string) => {
+        void (async () => {
+            console.log(`[WhatsApp] 🛑 Shutdown detectado (${signal}). Liberando recursos...`);
+            clearReconnectTimer();
+            await stopWhatsappClient(`shutdown:${signal}`);
+            await releaseWhatsappSessionLease(`shutdown:${signal}`);
+            process.exit(0);
+        })();
+    };
+
+    process.once('SIGINT', () => shutdown('SIGINT'));
+    process.once('SIGTERM', () => shutdown('SIGTERM'));
+    process.once('beforeExit', () => {
+        void releaseWhatsappSessionLease('beforeExit');
+    });
+};
+
 const startWhatsappClient = async () => {
     if (isWhatsappReady && whatsappClient) {
         return;
@@ -305,6 +439,12 @@ const startWhatsappClient = async () => {
     isStartingWhatsappClient = true;
 
     try {
+        const leaseReady = await ensureWhatsappSessionLease();
+        if (!leaseReady) {
+            scheduleReconnect(WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
+            return;
+        }
+
         const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
         console.log('[WhatsApp] Obteniendo version de Baileys...');
         let version: [number, number, number];
@@ -451,6 +591,7 @@ const startWhatsappClient = async () => {
 void (async () => {
     await loadPendingMessages();
     registerProcessSafetyHandlers();
+    registerProcessExitHandlers();
     await startWhatsappClient();
 })();
 

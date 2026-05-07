@@ -5,10 +5,14 @@ import {
     proto,
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
+import { randomUUID } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 
 const FALLBACK_AUTH_DIR = process.env.BAILEYS_AUTH_DIR || 'baileys_auth_info';
 const DB_AUTH_PREFIX = 'baileys-auth';
+const SESSION_LOCK_KEY = `${DB_AUTH_PREFIX}:lock:session`;
+const DEFAULT_SESSION_LEASE_TTL_MS = Number(process.env.BAILEYS_SESSION_LEASE_TTL_MS ?? 120000);
+const sessionLeaseOwnerId = `pid:${process.pid}:${randomUUID()}`;
 
 const prisma = process.env.DATABASE_URL ? new PrismaClient() : null;
 
@@ -16,6 +20,13 @@ type BaileysAuthStore = {
     state: AuthenticationState;
     saveCreds: () => Promise<void>;
     locationLabel: string;
+};
+
+type SessionLeasePayload = {
+    ownerId: string;
+    pid: number;
+    acquiredAt: number;
+    expiresAt: number;
 };
 
 const dbKey = (category: string, id: string) => `${DB_AUTH_PREFIX}:${category}:${id}`;
@@ -54,6 +65,125 @@ const deleteJson = async (key: string) => {
     }
 
     await prisma.baileysAuthKV.deleteMany({ where: { key } });
+};
+
+const parseSessionLease = (raw: string): SessionLeasePayload | null => {
+    try {
+        const parsed = JSON.parse(raw) as Partial<SessionLeasePayload>;
+
+        if (
+            typeof parsed.ownerId !== 'string' ||
+            typeof parsed.pid !== 'number' ||
+            typeof parsed.acquiredAt !== 'number' ||
+            typeof parsed.expiresAt !== 'number'
+        ) {
+            return null;
+        }
+
+        return {
+            ownerId: parsed.ownerId,
+            pid: parsed.pid,
+            acquiredAt: parsed.acquiredAt,
+            expiresAt: parsed.expiresAt
+        };
+    } catch (_error) {
+        return null;
+    }
+};
+
+const buildSessionLeasePayload = (ttlMs = DEFAULT_SESSION_LEASE_TTL_MS): SessionLeasePayload => {
+    const now = Date.now();
+
+    return {
+        ownerId: sessionLeaseOwnerId,
+        pid: process.pid,
+        acquiredAt: now,
+        expiresAt: now + ttlMs
+    };
+};
+
+export const acquireBaileysSessionLease = async (ttlMs = DEFAULT_SESSION_LEASE_TTL_MS) => {
+    if (!prisma) {
+        return true;
+    }
+
+    const nextPayload = buildSessionLeasePayload(ttlMs);
+    const nextSerialized = JSON.stringify(nextPayload);
+
+    try {
+        const existing = await prisma.baileysAuthKV.findUnique({ where: { key: SESSION_LOCK_KEY } });
+
+        if (!existing) {
+            try {
+                await prisma.baileysAuthKV.create({
+                    data: {
+                        key: SESSION_LOCK_KEY,
+                        data: nextSerialized
+                    }
+                });
+                return true;
+            } catch (_error) {
+                return false;
+            }
+        }
+
+        const currentLease = parseSessionLease(existing.data);
+        const leaseExpired = !currentLease || currentLease.expiresAt <= Date.now();
+        const sameOwner = currentLease?.ownerId === sessionLeaseOwnerId;
+
+        if (!leaseExpired && !sameOwner) {
+            return false;
+        }
+
+        const updated = await prisma.baileysAuthKV.updateMany({
+            where: {
+                key: SESSION_LOCK_KEY,
+                data: existing.data
+            },
+            data: {
+                data: nextSerialized
+            }
+        });
+
+        return updated.count === 1;
+    } catch (error) {
+        console.error('[WhatsApp] ⚠️ No se pudo adquirir lease de sesion en PostgreSQL:', error);
+        return false;
+    }
+};
+
+export const renewBaileysSessionLease = async (ttlMs = DEFAULT_SESSION_LEASE_TTL_MS) => {
+    return acquireBaileysSessionLease(ttlMs);
+};
+
+export const releaseBaileysSessionLease = async () => {
+    if (!prisma) {
+        return true;
+    }
+
+    try {
+        const existing = await prisma.baileysAuthKV.findUnique({ where: { key: SESSION_LOCK_KEY } });
+        if (!existing) {
+            return true;
+        }
+
+        const currentLease = parseSessionLease(existing.data);
+        if (!currentLease || currentLease.ownerId !== sessionLeaseOwnerId) {
+            return false;
+        }
+
+        await prisma.baileysAuthKV.deleteMany({
+            where: {
+                key: SESSION_LOCK_KEY,
+                data: existing.data
+            }
+        });
+
+        return true;
+    } catch (error) {
+        console.error('[WhatsApp] ⚠️ No se pudo liberar lease de sesion en PostgreSQL:', error);
+        return false;
+    }
 };
 
 const createPostgresAuthStore = async (): Promise<BaileysAuthStore> => {
