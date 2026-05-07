@@ -97,6 +97,8 @@ let whatsappClient: WASocket | null = null;
 let isWhatsappReady = false;
 let hasAuthSignal = false;
 let ownJidUser: string | null = null;
+let isStartingWhatsappClient = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
@@ -249,12 +251,30 @@ const waitForWhatsappReady = async (timeoutMs = 45000) => {
     }
 };
 
+const scheduleReconnect = (delayMs = 4000) => {
+    if (reconnectTimer) {
+        return;
+    }
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void startWhatsappClient();
+    }, delayMs);
+};
+
 const startWhatsappClient = async () => {
+    if (isStartingWhatsappClient) {
+        return;
+    }
+
+    isStartingWhatsappClient = true;
+
     try {
         const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
         const { version } = await fetchLatestBaileysVersion();
 
-        whatsappClient = makeWASocket({
+        const previousClient = whatsappClient;
+        const currentClient = makeWASocket({
             auth: state,
             version,
             logger: baileysLogger as any,
@@ -283,12 +303,27 @@ const startWhatsappClient = async () => {
             }
         });
 
-        whatsappClient.ev.on('creds.update', () => {
+        if (previousClient && previousClient !== currentClient) {
+            try {
+                (previousClient as any).ev?.removeAllListeners?.();
+                (previousClient as any).end?.(undefined);
+            } catch (_error) {
+                // Ignora errores de limpieza de sockets antiguos.
+            }
+        }
+
+        whatsappClient = currentClient;
+
+        currentClient.ev.on('creds.update', () => {
             void saveCreds();
             console.log(`[WhatsApp] 💾 Sesion actualizada en ${locationLabel}`);
         });
 
-        whatsappClient.ev.on('connection.update', (update) => {
+        currentClient.ev.on('connection.update', (update) => {
+            if (whatsappClient !== currentClient) {
+                return;
+            }
+
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
@@ -304,7 +339,7 @@ const startWhatsappClient = async () => {
                 hasAuthSignal = true;
                 isWhatsappReady = true;
                 lastReadyAt = Date.now();
-                ownJidUser = normalizeJidUser(whatsappClient?.user?.id || null);
+                ownJidUser = normalizeJidUser(currentClient.user?.id || null);
                 console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
                 void flushPendingMessages();
             }
@@ -317,7 +352,7 @@ const startWhatsappClient = async () => {
                 console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
                 if (shouldReconnect) {
                     console.log('[WhatsApp] Reintentando conexion...');
-                    void startWhatsappClient();
+                    scheduleReconnect();
                 } else {
                     console.error('[WhatsApp] Sesion cerrada. Se requiere nuevo escaneo QR.');
                 }
@@ -334,6 +369,9 @@ const startWhatsappClient = async () => {
     } catch (error) {
         isWhatsappReady = false;
         console.error('[WhatsApp] ❌ Error inicializando Baileys:', error);
+        scheduleReconnect(5000);
+    } finally {
+        isStartingWhatsappClient = false;
     }
 };
 
