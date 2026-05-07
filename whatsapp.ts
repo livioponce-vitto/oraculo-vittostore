@@ -262,7 +262,20 @@ const scheduleReconnect = (delayMs = 4000) => {
     }, delayMs);
 };
 
+const clearReconnectTimer = () => {
+    if (!reconnectTimer) {
+        return;
+    }
+
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+};
+
 const startWhatsappClient = async () => {
+    if (isWhatsappReady && whatsappClient) {
+        return;
+    }
+
     if (isStartingWhatsappClient) {
         return;
     }
@@ -340,6 +353,7 @@ const startWhatsappClient = async () => {
                 isWhatsappReady = true;
                 lastReadyAt = Date.now();
                 ownJidUser = normalizeJidUser(currentClient.user?.id || null);
+                clearReconnectTimer();
                 console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
                 void flushPendingMessages();
             }
