@@ -105,6 +105,9 @@ const MAX_RECONNECT_DELAY_MS = 120000;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
+let lastDisconnectCode: number | null = null;
+let lastDisconnectAt: number | null = null;
+let reconnectScheduledAt: number | null = null;
 
 const normalizeJidUser = (jid: string | null | undefined) => {
     if (!jid) {
@@ -118,6 +121,13 @@ const normalizeJidUser = (jid: string | null | undefined) => {
 
 export const getWhatsAppHealth = () => ({
     ready: isWhatsappReady,
+    reconnectAttempts,
+    lastDisconnectCode,
+    lastDisconnectAt,
+    reconnectScheduledInSeconds:
+        reconnectScheduledAt && reconnectScheduledAt > Date.now()
+            ? Math.ceil((reconnectScheduledAt - Date.now()) / 1000)
+            : 0,
     pendingMessages: pendingMessages.length,
     oldestPendingAgeSeconds:
         pendingMessages.length > 0
@@ -258,8 +268,11 @@ const scheduleReconnect = (delayMs = 4000) => {
         return;
     }
 
+    reconnectScheduledAt = Date.now() + delayMs;
+
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
+        reconnectScheduledAt = null;
         void startWhatsappClient();
     }, delayMs);
 };
@@ -277,6 +290,7 @@ const clearReconnectTimer = () => {
 
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+    reconnectScheduledAt = null;
 };
 
 const startWhatsappClient = async () => {
@@ -386,6 +400,8 @@ const startWhatsappClient = async () => {
                 const statusCode = Number((lastDisconnect?.error as any)?.output?.statusCode);
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
                 const isConnectionReplaced = statusCode === 440;
+                lastDisconnectCode = Number.isFinite(statusCode) ? statusCode : null;
+                lastDisconnectAt = Date.now();
 
                 console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
 
@@ -439,6 +455,14 @@ void (async () => {
 })();
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
+    return enviarMensajeWhatsAppModo(numero, mensaje, false);
+};
+
+export const enviarMensajeWhatsAppModo = async (
+    numero: string,
+    mensaje: string,
+    requireImmediateDelivery = false
+) => {
     try {
         const numeroNormalizado = normalizePhoneForWhatsApp(numero);
         const mensajeSimple = String(mensaje || '').trim();
@@ -449,6 +473,10 @@ export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => 
         }
 
         if (!whatsappClient || !isWhatsappReady) {
+            if (requireImmediateDelivery) {
+                throw new Error('Cliente de WhatsApp no READY para entrega inmediata.');
+            }
+
             enqueuePendingMessage(numeroNormalizado, mensajeSimple);
             return;
         }

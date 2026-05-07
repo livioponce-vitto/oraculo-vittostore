@@ -4,11 +4,12 @@ import cors from 'cors';
 import crypto from 'crypto';
 import {
   appendRecoveryLog,
+  findRecoveryEventByDedupeKey,
   getRecoveryStoreHealth,
   PersistedRecoveryStatus,
   recordRecoveryEvent
 } from './recovery-store';
-import { enviarMensajeWhatsApp, getWhatsAppHealth } from './whatsapp';
+import { enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
 
 dotenv.config();
 
@@ -170,6 +171,36 @@ const markAndCheckDuplicate = (key: string) => {
   return false;
 };
 
+const wasRecentlyPersisted = async (dedupeKey: string) => {
+  const event = await findRecoveryEventByDedupeKey(dedupeKey);
+  if (!event) {
+    return false;
+  }
+
+  const updatedAtMs = new Date(event.updatedAt).getTime();
+  const isInsideWindow = Date.now() - updatedAtMs <= WEBHOOK_DEDUPE_WINDOW_MS;
+  if (!isInsideWindow) {
+    return false;
+  }
+
+  // Only states that indicate an in-progress or completed send path should dedupe.
+  return ['queued', 'sent', 'duplicate'].includes(event.status);
+};
+
+const parseTotalPrice = (value: unknown) => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const setMessageTracking = (
   dedupeKey: string,
   status: RecoveryStatus,
@@ -233,7 +264,7 @@ const persistRecoveryLog = (input: {
     level: input.level,
     stage: input.stage,
     message: input.message,
-    payload: input.payload
+    payload: input.payload as any
   });
 };
 
@@ -289,7 +320,7 @@ const scheduleWhatsAppSend = (
 ) => {
   enqueueWhatsAppTask(async () => {
     try {
-      await enviarMensajeWhatsApp(numeroLimpio, mensaje);
+      await enviarMensajeWhatsAppModo(numeroLimpio, mensaje, true);
       setMessageTracking(dedupeKey, 'sent', attempt);
       persistRecoveryState({
         dedupeKey,
@@ -371,6 +402,8 @@ app.get('/health', (_req: Request, res: Response) => {
     recoveryTrackedKeys: RECOVERY_STATUS_TRACKING.size,
     queue: {
       pendingTasks: WA_TASK_QUEUE.length,
+      pendingWhatsAppMessages: wa.pendingMessages,
+      totalPending: WA_TASK_QUEUE.length + wa.pendingMessages,
       workerRunning: isQueueWorkerRunning,
       alertActive: isQueueAlertActive,
       alertThreshold: QUEUE_ALERT_THRESHOLD
@@ -389,11 +422,18 @@ app.get('/health', (_req: Request, res: Response) => {
       waRetryBaseDelayMs: WA_RETRY_BASE_DELAY_MS,
       queueAlertThreshold: QUEUE_ALERT_THRESHOLD
     },
+    integrity: {
+      dedupeWindowMs: WEBHOOK_DEDUPE_WINDOW_MS,
+      inMemoryDedupeKeys: RECOVERY_STATUS_TRACKING.size,
+      lastDisconnectCode: wa.lastDisconnectCode,
+      reconnectAttempts: wa.reconnectAttempts,
+      reconnectScheduledInSeconds: wa.reconnectScheduledInSeconds
+    },
     timestamp: new Date().toISOString()
   });
 });
 
-app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
+app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) => {
   try {
     if (!hasValidShopifyHmac(req as RequestWithRawBody)) {
       console.error('[Security] ❌ Firma HMAC inválida para webhook de Shopify.');
@@ -438,7 +478,9 @@ app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
     console.log(`🧩 Dedupe key: ${dedupeKey}`);
     console.log('==============================');
 
-    if (phone && body?.total_price !== '0.00') {
+    const totalPrice = parseTotalPrice(body?.total_price);
+
+    if (phone && totalPrice !== null && totalPrice > 0) {
       if (markAndCheckDuplicate(dedupeKey)) {
         setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado');
         persistRecoveryState({
@@ -458,6 +500,27 @@ app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
         });
         console.log('♻️ Webhook duplicado detectado dentro de la ventana. No se reenvía WhatsApp.');
         return res.status(200).send('Webhook duplicado ignorado');
+      }
+
+      if (await wasRecentlyPersisted(dedupeKey)) {
+        setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado por persistencia');
+        persistRecoveryState({
+          dedupeKey,
+          status: 'duplicate',
+          attempts: 0,
+          phone,
+          customerName: firstName,
+          checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
+          lastError: 'Webhook duplicado por persistencia'
+        });
+        persistRecoveryLog({
+          dedupeKey,
+          level: 'warn',
+          stage: 'dedupe_duplicate_persisted',
+          message: 'Webhook duplicado detectado por registro persistido'
+        });
+        console.log('♻️ Webhook duplicado detectado por persistencia. No se reenvía WhatsApp.');
+        return res.status(200).send('Webhook duplicado persistente ignorado');
       }
 
       const numeroLimpio = normalizePhone(phone);
@@ -528,7 +591,8 @@ app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
         message: 'No se envio WhatsApp por falta de numero o total 0',
         payload: {
           hasPhone: Boolean(phone),
-          totalPrice: body?.total_price ?? null
+          totalPrice: body?.total_price ?? null,
+          parsedTotalPrice: totalPrice
         }
       });
       console.log('⚠️ No se envió WhatsApp (Falta número o es un carrito de prueba de $0).');

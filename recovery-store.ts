@@ -78,6 +78,19 @@ export const getRecoveryStoreHealth = () => ({
   lastError: lastPersistenceError
 });
 
+export const findRecoveryEventByDedupeKey = async (dedupeKey: string) => {
+  return withPrisma(async (client) => {
+    return client.recoveryEvent.findUnique({
+      where: { dedupeKey },
+      select: {
+        status: true,
+        updatedAt: true,
+        sentAt: true
+      }
+    });
+  });
+};
+
 export const recordRecoveryEvent = async (input: RecoveryEventWrite) => {
   return withPrisma(async (client) => {
     const event = await safeUpsertRecoveryEvent(client, {
