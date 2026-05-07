@@ -99,7 +99,9 @@ let hasAuthSignal = false;
 let ownJidUser: string | null = null;
 let isStartingWhatsappClient = false;
 let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
 const MAX_PENDING_MESSAGES = 100;
+const MAX_RECONNECT_DELAY_MS = 120000;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
@@ -262,6 +264,12 @@ const scheduleReconnect = (delayMs = 4000) => {
     }, delayMs);
 };
 
+const getReconnectDelayMs = (statusCode: number) => {
+    const attemptFactor = Math.max(0, reconnectAttempts - 1);
+    const baseDelay = statusCode === 440 ? 30000 : 4000;
+    return Math.min(MAX_RECONNECT_DELAY_MS, baseDelay * Math.pow(2, attemptFactor));
+};
+
 const clearReconnectTimer = () => {
     if (!reconnectTimer) {
         return;
@@ -285,7 +293,7 @@ const startWhatsappClient = async () => {
     try {
         const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
         console.log('[WhatsApp] Obteniendo version de Baileys...');
-        let version: number[];
+        let version: [number, number, number];
         try {
             const result = await Promise.race([
                 fetchLatestBaileysVersion(),
@@ -293,7 +301,7 @@ const startWhatsappClient = async () => {
                     setTimeout(() => reject(new Error('fetchLatestBaileysVersion timeout')), 15000)
                 )
             ]);
-            version = result.version;
+            version = result.version as [number, number, number];
             console.log('[WhatsApp] Version obtenida:', version.join('.'));
         } catch (versionError) {
             version = [2, 3000, 1015901307];
@@ -365,6 +373,7 @@ const startWhatsappClient = async () => {
             if (connection === 'open') {
                 hasAuthSignal = true;
                 isWhatsappReady = true;
+                reconnectAttempts = 0;
                 lastReadyAt = Date.now();
                 ownJidUser = normalizeJidUser(currentClient.user?.id || null);
                 clearReconnectTimer();
@@ -381,15 +390,28 @@ const startWhatsappClient = async () => {
                 console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
 
                 if (isLoggedOut) {
+                    reconnectAttempts = 0;
                     console.error('[WhatsApp] Sesion cerrada (401). Borrando credenciales y solicitando nuevo QR...');
                     void clearBaileysAuthStore().then(() => scheduleReconnect(2000));
-                } else if (isConnectionReplaced) {
-                    // 440 = sesion reemplazada. Esperar 30s para evitar loop infinito.
-                    console.warn('[WhatsApp] ⚠️ Conexion reemplazada (440). Esperando 30s antes de reconectar para evitar loop...');
-                    scheduleReconnect(30000);
                 } else {
-                    console.log('[WhatsApp] Reintentando conexion...');
-                    scheduleReconnect();
+                    reconnectAttempts += 1;
+                    const reconnectDelayMs = getReconnectDelayMs(statusCode);
+
+                    if (isConnectionReplaced) {
+                        console.warn(
+                            `[WhatsApp] ⚠️ Conexion reemplazada (440). Reintento ${reconnectAttempts} en ${Math.round(
+                                reconnectDelayMs / 1000
+                            )}s para evitar loop...`
+                        );
+                    } else {
+                        console.log(
+                            `[WhatsApp] Reintentando conexion... intento ${reconnectAttempts} en ${Math.round(
+                                reconnectDelayMs / 1000
+                            )}s`
+                        );
+                    }
+
+                    scheduleReconnect(reconnectDelayMs);
                 }
             }
         });
