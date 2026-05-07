@@ -1,11 +1,11 @@
 import makeWASocket, {
     DisconnectReason,
     fetchLatestBaileysVersion,
-    useMultiFileAuthState,
     WASocket
 } from '@whiskeysockets/baileys';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { createBaileysAuthStore } from './baileys-auth-store';
 
 const ignoredBaileysNoise = [
     'failed to decrypt message',
@@ -61,7 +61,6 @@ let hasAuthSignal = false;
 let ownJidUser: string | null = null;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
-const AUTH_STATE_DIR = 'baileys_auth_info';
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
 
@@ -214,7 +213,7 @@ const waitForWhatsappReady = async (timeoutMs = 45000) => {
 
 const startWhatsappClient = async () => {
     try {
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_STATE_DIR);
+        const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
         const { version } = await fetchLatestBaileysVersion();
 
         whatsappClient = makeWASocket({
@@ -247,8 +246,8 @@ const startWhatsappClient = async () => {
         });
 
         whatsappClient.ev.on('creds.update', () => {
-            saveCreds();
-            console.log(`[WhatsApp] 💾 Sesion actualizada en ${AUTH_STATE_DIR}`);
+            void saveCreds();
+            console.log(`[WhatsApp] 💾 Sesion actualizada en ${locationLabel}`);
         });
 
         whatsappClient.ev.on('connection.update', (update) => {
@@ -287,7 +286,7 @@ const startWhatsappClient = async () => {
             }
         });
 
-        console.log(`[WhatsApp] Inicializando cliente y esperando QR/autenticacion... (auth dir: ${AUTH_STATE_DIR})`);
+        console.log(`[WhatsApp] Inicializando cliente y esperando QR/autenticacion... (auth store: ${locationLabel})`);
 
         setTimeout(() => {
             if (!hasAuthSignal && !isWhatsappReady) {

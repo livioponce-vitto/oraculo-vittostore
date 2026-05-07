@@ -43,3 +43,10 @@ model RecoveryLog {
 
   @@index([eventId, createdAt])
 }
+
+model BaileysAuthKV {
+  key       String   @id
+  data      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
