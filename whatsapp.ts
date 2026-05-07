@@ -284,7 +284,21 @@ const startWhatsappClient = async () => {
 
     try {
         const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
-        const { version } = await fetchLatestBaileysVersion();
+        console.log('[WhatsApp] Obteniendo version de Baileys...');
+        let version: number[];
+        try {
+            const result = await Promise.race([
+                fetchLatestBaileysVersion(),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('fetchLatestBaileysVersion timeout')), 15000)
+                )
+            ]);
+            version = result.version;
+            console.log('[WhatsApp] Version obtenida:', version.join('.'));
+        } catch (versionError) {
+            version = [2, 3000, 1015901307];
+            console.warn('[WhatsApp] ⚠️ No se pudo obtener version de Baileys, usando fallback:', version.join('.'));
+        }
 
         const previousClient = whatsappClient;
         const currentClient = makeWASocket({
