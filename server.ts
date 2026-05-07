@@ -14,6 +14,42 @@ import { enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
 
 dotenv.config();
 
+// ─── LOGGING ESTRUCTURADO ──────────────────────────────────────────────────────
+type LogSeverity = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL';
+
+const structuredLog = (
+  severity: LogSeverity,
+  stage: string,
+  message: string,
+  data?: Record<string, unknown>
+) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    severity,
+    stage,
+    message,
+    ...(data && { data })
+  };
+
+  // Log a stdout para que Render lo capture
+  console.log(JSON.stringify(logEntry));
+
+  // También log legible para desarrollo local
+  if (process.env.NODE_ENV !== 'production') {
+    const severityColor: Record<LogSeverity, string> = {
+      DEBUG: '\x1b[36m',    // Cyan
+      INFO: '\x1b[32m',     // Green
+      WARN: '\x1b[33m',     // Yellow
+      ERROR: '\x1b[31m',    // Red
+      CRITICAL: '\x1b[41m'  // Red background
+    };
+    const reset = '\x1b[0m';
+    const color = severityColor[severity] || '';
+    console.error(`${color}[${severity}] ${timestamp} [${stage}] ${message}${reset}`, data || '');
+  }
+};
+
 // ─── CONFIGURACIÓN GLOBAL ─────────────────────────────────────────────────────
 // Edita aquí o define en .env para cambiar sin tocar lógica.
 
@@ -336,6 +372,11 @@ const scheduleWhatsAppSend = (
         stage: 'send_success',
         message: `Mensaje enviado correctamente en intento ${attempt}`
       });
+      structuredLog('INFO', 'send_success', 'Mensaje de WhatsApp enviado exitosamente', {
+        dedupeKey,
+        numeroLimpio,
+        attempt
+      });
       console.log(`[QUEUE] ✅ Envío exitoso para ${dedupeKey} (intento ${attempt}).`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -354,6 +395,14 @@ const scheduleWhatsAppSend = (
         message: `Error enviando mensaje en intento ${attempt}`,
         payload: { error: errorMessage }
       });
+      const severity = attempt >= WA_MAX_ATTEMPTS ? 'ERROR' : 'WARN';
+      structuredLog(severity, 'send_failed', `Fallo en envío de WhatsApp (intento ${attempt}/${WA_MAX_ATTEMPTS})`, {
+        dedupeKey,
+        numeroLimpio,
+        attempt,
+        error: errorMessage,
+        maxAttempts: WA_MAX_ATTEMPTS
+      });
       console.error(`[QUEUE] ❌ Error en ${dedupeKey} (intento ${attempt}): ${errorMessage}`);
 
       if (attempt < WA_MAX_ATTEMPTS) {
@@ -364,6 +413,11 @@ const scheduleWhatsAppSend = (
           stage: 'retry_scheduled',
           message: `Reintento programado para intento ${attempt + 1}`,
           payload: { retryDelayMs }
+        });
+        structuredLog('WARN', 'retry_scheduled', `Reintento programado para mensaje`, {
+          dedupeKey,
+          attempt: attempt + 1,
+          retryDelayMs
         });
         setTimeout(() => {
           scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje, attempt + 1);
@@ -385,6 +439,42 @@ app.use(
 app.get('/', (_req: Request, res: Response) => {
   res.type('text/plain').send('👑 El Oráculo de VITTOSTORE está en línea y operando.');
 });
+
+// ─── MONITOREO: Calcula alertas críticas ─────────────────────────────────────
+const calculateHealthAlerts = (
+  queuePending: number,
+  waReady: boolean,
+  waReconnectAttempts: number,
+  trackingFailed: number
+) => {
+  const alerts: string[] = [];
+  
+  // Alerta 1: Queue saturation
+  if (queuePending > QUEUE_ALERT_THRESHOLD) {
+    alerts.push(`QUEUE_SATURATED: ${queuePending} > ${QUEUE_ALERT_THRESHOLD}`);
+  }
+  
+  // Alerta 2: WhatsApp desconectado
+  if (!waReady) {
+    alerts.push('WHATSAPP_DISCONNECTED: Session no está en estado "open"');
+  }
+  
+  // Alerta 3: Reconnect loop
+  if (waReconnectAttempts > 3) {
+    alerts.push(`RECONNECT_LOOP: ${waReconnectAttempts} intentos en ventana activa`);
+  }
+  
+  // Alerta 4: Failed messages
+  if (trackingFailed > 5) {
+    alerts.push(`DELIVERY_FAILURES: ${trackingFailed} mensajes fallidos`);
+  }
+  
+  return {
+    hasAlerts: alerts.length > 0,
+    count: alerts.length,
+    messages: alerts
+  };
+};
 
 app.get('/health', async (_req: Request, res: Response) => {
   const wa = getWhatsAppHealth();
@@ -413,8 +503,18 @@ app.get('/health', async (_req: Request, res: Response) => {
         source: 'memory'
       };
 
+  const queueTotalPending = WA_TASK_QUEUE.length + wa.pendingMessages;
+  const alerts = calculateHealthAlerts(
+    queueTotalPending,
+    wa.ready,
+    wa.reconnectAttempts,
+    trackingSnapshot.failed
+  );
+
   res.status(200).json({
     ok: true,
+    healthy: !alerts.hasAlerts,
+    alerts,
     uptimeSeconds: Math.floor(process.uptime()),
     whatsapp: wa,
     persistence,
@@ -422,7 +522,7 @@ app.get('/health', async (_req: Request, res: Response) => {
     queue: {
       pendingTasks: WA_TASK_QUEUE.length,
       pendingWhatsAppMessages: wa.pendingMessages,
-      totalPending: WA_TASK_QUEUE.length + wa.pendingMessages,
+      totalPending: queueTotalPending,
       workerRunning: isQueueWorkerRunning,
       alertActive: isQueueAlertActive,
       alertThreshold: QUEUE_ALERT_THRESHOLD
@@ -518,6 +618,11 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
           stage: 'dedupe_duplicate',
           message: 'Webhook duplicado ignorado'
         });
+        structuredLog('WARN', 'dedupe_duplicate', 'Webhook duplicado dentro de ventana', {
+          dedupeKey,
+          phone,
+          firstName
+        });
         console.log('♻️ Webhook duplicado detectado dentro de la ventana. No se reenvía WhatsApp.');
         return res.status(200).send('Webhook duplicado ignorado');
       }
@@ -538,6 +643,11 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
           level: 'warn',
           stage: 'dedupe_duplicate_persisted',
           message: 'Webhook duplicado detectado por registro persistido'
+        });
+        structuredLog('WARN', 'dedupe_duplicate_persisted', 'Webhook duplicado en base de datos', {
+          dedupeKey,
+          phone,
+          firstName
         });
         console.log('♻️ Webhook duplicado detectado por persistencia. No se reenvía WhatsApp.');
         return res.status(200).send('Webhook duplicado persistente ignorado');
@@ -562,6 +672,11 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
           stage: 'phone_invalid',
           message: 'Numero invalido para WhatsApp; se omite envio',
           payload: { numeroLimpio }
+        });
+        structuredLog('WARN', 'phone_invalid', 'Número inválido para WhatsApp', {
+          dedupeKey,
+          numeroLimpio,
+          firstName
         });
         console.log(`⚠️ Número inválido para WhatsApp. Se omite envío: ${numeroLimpio}`);
         return res.status(200).send('Webhook procesado (numero invalido)');
@@ -589,6 +704,13 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
         message: 'Mensaje encolado para envio',
         payload: { numeroLimpio, checkoutUrl }
       });
+      structuredLog('INFO', 'message_queued', 'Mensaje de recuperación encolado', {
+        dedupeKey,
+        phone: numeroLimpio,
+        firstName,
+        checkoutUrl,
+        queueLength: WA_TASK_QUEUE.length
+      });
       scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje);
       console.log(`[QUEUE] 📨 Mensaje encolado para ${dedupeKey}. Cola actual: ${WA_TASK_QUEUE.length}`);
 
@@ -614,6 +736,13 @@ app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) =
           totalPrice: body?.total_price ?? null,
           parsedTotalPrice: totalPrice
         }
+      });
+      structuredLog('WARN', 'message_skipped', 'Webhook omitido por validación', {
+        dedupeKey,
+        firstName,
+        hasPhone: Boolean(phone),
+        totalPrice,
+        reason: !phone ? 'no_phone' : totalPrice === null ? 'invalid_price' : 'zero_price'
       });
       console.log('⚠️ No se envió WhatsApp (Falta número o es un carrito de prueba de $0).');
     }
