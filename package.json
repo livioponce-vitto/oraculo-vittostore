@@ -25,6 +25,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "link-preview-js": "^3.2.0",
+    "ts-node": "^10.9.2",
     "tsx": "^4.21.0"
   },
   "devDependencies": {
@@ -32,7 +33,6 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.0",
     "prisma": "^6.8.2",
-    "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   }
 }
