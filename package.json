@@ -8,7 +8,7 @@
     "start": "tsx server.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
-    "postinstall": "prisma generate && prisma migrate deploy"
+    "postinstall": "prisma generate && (prisma migrate resolve --applied 20250507000000_add_baileys_auth_kv || true) && prisma migrate deploy"
   },
   "keywords": [],
   "author": "",
