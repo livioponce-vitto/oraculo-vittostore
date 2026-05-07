@@ -375,15 +375,21 @@ const startWhatsappClient = async () => {
             if (connection === 'close') {
                 isWhatsappReady = false;
                 const statusCode = Number((lastDisconnect?.error as any)?.output?.statusCode);
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+                const isConnectionReplaced = statusCode === 440;
 
                 console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
-                if (shouldReconnect) {
-                    console.log('[WhatsApp] Reintentando conexion...');
-                    scheduleReconnect();
-                } else {
+
+                if (isLoggedOut) {
                     console.error('[WhatsApp] Sesion cerrada (401). Borrando credenciales y solicitando nuevo QR...');
                     void clearBaileysAuthStore().then(() => scheduleReconnect(2000));
+                } else if (isConnectionReplaced) {
+                    // 440 = sesion reemplazada. Esperar 30s para evitar loop infinito.
+                    console.warn('[WhatsApp] ⚠️ Conexion reemplazada (440). Esperando 30s antes de reconectar para evitar loop...');
+                    scheduleReconnect(30000);
+                } else {
+                    console.log('[WhatsApp] Reintentando conexion...');
+                    scheduleReconnect();
                 }
             }
         });
