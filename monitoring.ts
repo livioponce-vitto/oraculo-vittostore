@@ -1,12 +1,7 @@
-/**
- * MONITORING SCRIPT
- * 
- * Ejecutar cada 5 minutos via cron job en Render para validar salud del sistema.
- * 
- * En Render:
- * - Settings → Environment → Add cronSchedule env var: "*/5 * * * *" (cada 5 min)
- * - Deploy hook para ejecutar: node --loader ts-node/esm monitoring.ts
- */
+// MONITORING SCRIPT
+// Ejecutar cada 5 minutos via cron job en Render para validar salud del sistema.
+// Schedule: "*/5 * * * *" (cada 5 min)
+// Command: npx tsx monitoring.ts
 
 import https from 'https';
 
