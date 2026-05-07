@@ -55,6 +55,44 @@ const baileysLogger = {
     }
 };
 
+    let processSafetyHandlersRegistered = false;
+
+    const isTransientBaileysTimeoutError = (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error || '');
+        const stack = error instanceof Error ? error.stack || '' : '';
+
+        return (
+            message.toLowerCase().includes('timed out') &&
+            stack.toLowerCase().includes('@whiskeysockets/baileys')
+        );
+    };
+
+    const registerProcessSafetyHandlers = () => {
+        if (processSafetyHandlersRegistered) {
+            return;
+        }
+
+        processSafetyHandlersRegistered = true;
+
+        process.on('unhandledRejection', (reason) => {
+            if (isTransientBaileysTimeoutError(reason)) {
+                console.warn('[WhatsApp] ⚠️ Timeout transitorio de Baileys detectado. Se mantiene el proceso activo.');
+                return;
+            }
+
+            console.error('[WhatsApp] ❌ unhandledRejection:', reason);
+        });
+
+        process.on('uncaughtException', (error) => {
+            if (isTransientBaileysTimeoutError(error)) {
+                console.warn('[WhatsApp] ⚠️ uncaughtException transitoria de Baileys (timeout). Se ignora para evitar restart.');
+                return;
+            }
+
+            console.error('[WhatsApp] ❌ uncaughtException:', error);
+        });
+    };
+
 let whatsappClient: WASocket | null = null;
 let isWhatsappReady = false;
 let hasAuthSignal = false;
@@ -301,6 +339,7 @@ const startWhatsappClient = async () => {
 
 void (async () => {
     await loadPendingMessages();
+    registerProcessSafetyHandlers();
     await startWhatsappClient();
 })();
 
