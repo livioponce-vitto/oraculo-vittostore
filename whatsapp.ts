@@ -58,11 +58,22 @@ const baileysLogger = {
 let whatsappClient: WASocket | null = null;
 let isWhatsappReady = false;
 let hasAuthSignal = false;
+let ownJidUser: string | null = null;
 const MAX_PENDING_MESSAGES = 100;
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
 const AUTH_STATE_DIR = 'baileys_auth_info';
 const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
 let lastReadyAt: number | null = null;
+
+const normalizeJidUser = (jid: string | null | undefined) => {
+    if (!jid) {
+        return null;
+    }
+
+    const [userPart] = jid.split('@');
+    const [plainUser] = userPart.split(':');
+    return plainUser || null;
+};
 
 export const getWhatsAppHealth = () => ({
     ready: isWhatsappReady,
@@ -217,7 +228,22 @@ const startWhatsappClient = async () => {
             keepAliveIntervalMs: 30000,
             syncFullHistory: false,
             fireInitQueries: false,
-            shouldIgnoreJid: (jid) => (jid ? jid.endsWith('@g.us') : false)
+            shouldIgnoreJid: (jid) => {
+                if (!jid) {
+                    return false;
+                }
+
+                if (jid.endsWith('@g.us')) {
+                    return true;
+                }
+
+                const incomingUser = normalizeJidUser(jid);
+                if (ownJidUser && incomingUser && incomingUser === ownJidUser) {
+                    return true;
+                }
+
+                return false;
+            }
         });
 
         whatsappClient.ev.on('creds.update', () => {
@@ -241,6 +267,7 @@ const startWhatsappClient = async () => {
                 hasAuthSignal = true;
                 isWhatsappReady = true;
                 lastReadyAt = Date.now();
+                ownJidUser = normalizeJidUser(whatsappClient?.user?.id || null);
                 console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
                 void flushPendingMessages();
             }
