@@ -438,28 +438,28 @@ app.post('/api/webhooks/shopify/checkout', (req: Request, res: Response) => {
     console.log(`🧩 Dedupe key: ${dedupeKey}`);
     console.log('==============================');
 
-    if (markAndCheckDuplicate(dedupeKey)) {
-      setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado');
-      persistRecoveryState({
-        dedupeKey,
-        status: 'duplicate',
-        attempts: 0,
-        phone,
-        customerName: firstName,
-        checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
-        lastError: 'Webhook duplicado'
-      });
-      persistRecoveryLog({
-        dedupeKey,
-        level: 'warn',
-        stage: 'dedupe_duplicate',
-        message: 'Webhook duplicado ignorado'
-      });
-      console.log('♻️ Webhook duplicado detectado dentro de la ventana. No se reenvía WhatsApp.');
-      return res.status(200).send('Webhook duplicado ignorado');
-    }
-
     if (phone && body?.total_price !== '0.00') {
+      if (markAndCheckDuplicate(dedupeKey)) {
+        setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado');
+        persistRecoveryState({
+          dedupeKey,
+          status: 'duplicate',
+          attempts: 0,
+          phone,
+          customerName: firstName,
+          checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
+          lastError: 'Webhook duplicado'
+        });
+        persistRecoveryLog({
+          dedupeKey,
+          level: 'warn',
+          stage: 'dedupe_duplicate',
+          message: 'Webhook duplicado ignorado'
+        });
+        console.log('♻️ Webhook duplicado detectado dentro de la ventana. No se reenvía WhatsApp.');
+        return res.status(200).send('Webhook duplicado ignorado');
+      }
+
       const numeroLimpio = normalizePhone(phone);
 
       if (!isValidPhoneForWhatsApp(numeroLimpio)) {

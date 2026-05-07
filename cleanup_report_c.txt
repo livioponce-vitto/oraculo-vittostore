@@ -1,0 +1,7 @@
+﻿Libre C GB: 7.08
+LocalTemp GB: 0.2
+Recycle C GB: 0.35
+WinUpdate Download GB: 0.91
+Downloads GB: 0.55
+node (1) exists: False
+node (2) exists: False

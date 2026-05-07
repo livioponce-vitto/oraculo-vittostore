@@ -8,7 +8,7 @@
     "start": "tsx server.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate && prisma migrate deploy"
   },
   "keywords": [],
   "author": "",
