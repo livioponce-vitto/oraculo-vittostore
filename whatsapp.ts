@@ -5,7 +5,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { createBaileysAuthStore } from './baileys-auth-store';
+import { createBaileysAuthStore, clearBaileysAuthStore } from './baileys-auth-store';
 
 const ignoredBaileysNoise = [
     'failed to decrypt message',
@@ -368,7 +368,8 @@ const startWhatsappClient = async () => {
                     console.log('[WhatsApp] Reintentando conexion...');
                     scheduleReconnect();
                 } else {
-                    console.error('[WhatsApp] Sesion cerrada. Se requiere nuevo escaneo QR.');
+                    console.error('[WhatsApp] Sesion cerrada (401). Borrando credenciales y solicitando nuevo QR...');
+                    void clearBaileysAuthStore().then(() => scheduleReconnect(2000));
                 }
             }
         });

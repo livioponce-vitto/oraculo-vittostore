@@ -117,6 +117,19 @@ const createFileAuthStore = async (): Promise<BaileysAuthStore> => {
     };
 };
 
+export const clearBaileysAuthStore = async (): Promise<void> => {
+    if (!prisma) {
+        return;
+    }
+
+    try {
+        await prisma.baileysAuthKV.deleteMany({});
+        console.log('[WhatsApp] 🗑️ Credenciales borradas de PostgreSQL.');
+    } catch (error) {
+        console.error('[WhatsApp] ⚠️ No se pudo borrar credenciales de PostgreSQL:', error);
+    }
+};
+
 export const createBaileysAuthStore = async (): Promise<BaileysAuthStore> => {
     if (!prisma) {
         return createFileAuthStore();
