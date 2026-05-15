@@ -1,3 +1,24 @@
+// ─── MEJORA-3: Configuración de ventana de deduplicación de incidentes ────────
+
+/**
+ * Establece la ventana de deduplicación de incidentes en ContingencyService.
+ * Por defecto = 30 min. Cambia DEDUP_WINDOW_MIN abajo y ejecuta esta función.
+ */
+function setContingencyDedupWindow() {
+  var DEDUP_WINDOW_MIN = 60; // ← ajusta aquí si quieres otro valor
+
+  PropertiesService.getScriptProperties().setProperty(
+    'INCIDENT_DEDUP_WINDOW_MIN',
+    String(DEDUP_WINDOW_MIN)
+  );
+
+  var msg = '✅ Ventana de deduplicación configurada: ' + DEDUP_WINDOW_MIN + ' minutos.\n\n' +
+            'El mismo incidente no generará nuevas filas en Contingencia_Integraciones\n' +
+            'si se repite dentro de ese período.';
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
 // ─── MEJORA-1: Corrección de filas GWS mal ingresadas ────────────────────────
 // Rows 11-12 de Libro_Mayor tienen el esquema de columnas incorrecto porque
 // el proceso BOT_MANUAL los ingresó con un mapeo desalineado.
