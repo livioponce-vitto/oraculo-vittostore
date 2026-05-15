@@ -209,7 +209,7 @@ var ComplianceScheduler = (function () {
         ? (Date.now() - new Date(lastRotation).getTime()) / 86400000
         : 999;
 
-      if (daysSinceLast >= 7) {
+      if (daysSinceLast >= 1) {
         AuditService.rotateAuditLog();
       }
     } catch (e) {
