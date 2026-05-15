@@ -1,154 +1,17 @@
-import makeWASocket, {
-    DisconnectReason,
-    fetchLatestBaileysVersion,
-    WASocket
-} from '@whiskeysockets/baileys';
-import { promises as fs } from 'fs';
-import path from 'path';
-import {
-    acquireBaileysSessionLease,
-    clearBaileysAuthStore,
-    createBaileysAuthStore,
-    releaseBaileysSessionLease,
-    renewBaileysSessionLease
-} from './baileys-auth-store';
 
-const ignoredBaileysNoise = [
-    'failed to decrypt message',
-    'sent retry receipt',
-    'got history notification'
-];
+// --- CONFIGURACIÓN GLOBAL WHATSAPP API SOLO META CLOUD ---
+const WHATSAPP_API_ENDPOINT = process.env.WHATSAPP_API_ENDPOINT ?? '';
+const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN ?? '';
+const isWhatsAppCloudApi = WHATSAPP_API_ENDPOINT.startsWith('https://');
 
-const shouldIgnoreBaileysLog = (args: unknown[]) => {
-    const text = args
-        .map((arg) => {
-            if (typeof arg === 'string') {
-                return arg;
-            }
+// No Baileys: solo Meta Cloud API
 
-            try {
-                return JSON.stringify(arg);
-            } catch (_error) {
-                return String(arg);
-            }
-        })
-        .join(' ')
-        .toLowerCase();
-
-    return ignoredBaileysNoise.some((item) => text.includes(item));
-};
-
-const baileysLogger = {
-    level: 'error',
-    child: () => baileysLogger,
-    trace: (..._args: unknown[]) => undefined,
-    debug: (..._args: unknown[]) => undefined,
-    info: (..._args: unknown[]) => undefined,
-    warn: (...args: unknown[]) => {
-        if (!shouldIgnoreBaileysLog(args)) {
-            console.warn(...args);
-        }
-    },
-    error: (...args: unknown[]) => {
-        if (!shouldIgnoreBaileysLog(args)) {
-            console.error(...args);
-        }
-    },
-    fatal: (...args: unknown[]) => {
-        if (!shouldIgnoreBaileysLog(args)) {
-            console.error(...args);
-        }
-    }
-};
-
-    let processSafetyHandlersRegistered = false;
-
-    const isTransientBaileysTimeoutError = (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error || '');
-        const stack = error instanceof Error ? error.stack || '' : '';
-
-        return (
-            message.toLowerCase().includes('timed out') &&
-            stack.toLowerCase().includes('@whiskeysockets/baileys')
-        );
-    };
-
-    const registerProcessSafetyHandlers = () => {
-        if (processSafetyHandlersRegistered) {
-            return;
-        }
-
-        processSafetyHandlersRegistered = true;
-
-        process.on('unhandledRejection', (reason) => {
-            if (isTransientBaileysTimeoutError(reason)) {
-                console.warn('[WhatsApp] ⚠️ Timeout transitorio de Baileys detectado. Se mantiene el proceso activo.');
-                return;
-            }
-
-            console.error('[WhatsApp] ❌ unhandledRejection:', reason);
-        });
-
-        process.on('uncaughtException', (error) => {
-            if (isTransientBaileysTimeoutError(error)) {
-                console.warn('[WhatsApp] ⚠️ uncaughtException transitoria de Baileys (timeout). Se ignora para evitar restart.');
-                return;
-            }
-
-            console.error('[WhatsApp] ❌ uncaughtException:', error);
-        });
-    };
-
-let whatsappClient: WASocket | null = null;
+// --- Estado WhatsApp Cloud API ---
 let isWhatsappReady = false;
-let hasAuthSignal = false;
-let ownJidUser: string | null = null;
-let isStartingWhatsappClient = false;
-let reconnectTimer: NodeJS.Timeout | null = null;
-let leaseRenewTimer: NodeJS.Timeout | null = null;
-let isRenewingWhatsappLease = false;
-let isWhatsappLeaseHeld = false;
-let reconnectAttempts = 0;
-const MAX_PENDING_MESSAGES = 100;
-const MAX_RECONNECT_DELAY_MS = 120000;
-const WHATSAPP_SESSION_LEASE_TTL_MS = Number(process.env.BAILEYS_SESSION_LEASE_TTL_MS ?? 120000);
-const WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS = Number(
-    process.env.BAILEYS_SESSION_LEASE_RENEW_INTERVAL_MS ?? 30000
-);
 const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
-const PENDING_MESSAGES_FILE = path.resolve(process.cwd(), 'pending_messages.json');
-let lastReadyAt: number | null = null;
-let lastDisconnectCode: number | null = null;
-let lastDisconnectAt: number | null = null;
-let reconnectScheduledAt: number | null = null;
+const MAX_PENDING_MESSAGES = 100;
 
-const normalizeJidUser = (jid: string | null | undefined) => {
-    if (!jid) {
-        return null;
-    }
-
-    const [userPart] = jid.split('@');
-    const [plainUser] = userPart.split(':');
-    return plainUser || null;
-};
-
-export const getWhatsAppHealth = () => ({
-    ready: isWhatsappReady,
-    leaseHeld: isWhatsappLeaseHeld,
-    reconnectAttempts,
-    lastDisconnectCode,
-    lastDisconnectAt,
-    reconnectScheduledInSeconds:
-        reconnectScheduledAt && reconnectScheduledAt > Date.now()
-            ? Math.ceil((reconnectScheduledAt - Date.now()) / 1000)
-            : 0,
-    pendingMessages: pendingMessages.length,
-    oldestPendingAgeSeconds:
-        pendingMessages.length > 0
-            ? Math.floor((Date.now() - pendingMessages[0].createdAt) / 1000)
-            : 0,
-    lastReadyAt
-});
+// --- Funciones principales ---
 
 const normalizePhoneForWhatsApp = (raw: string) => {
     // Shopify puede enviar +569..., espacios o guiones.
@@ -156,476 +19,70 @@ const normalizePhoneForWhatsApp = (raw: string) => {
     return cleaned;
 };
 
-const buildWhatsAppJid = (raw: string) => {
-    const normalized = normalizePhoneForWhatsApp(raw);
-
-    if (!/^\d{11,15}$/.test(normalized)) {
-        throw new Error(`Numero invalido para WhatsApp: ${raw}`);
-    }
-
-    // En Baileys el JID correcto para usuario es @s.whatsapp.net.
-    return `${normalized}@s.whatsapp.net`;
-};
-
 const persistPendingMessages = async () => {
-    try {
-        await fs.writeFile(PENDING_MESSAGES_FILE, JSON.stringify(pendingMessages, null, 2), 'utf-8');
-    } catch (error) {
-        console.error('[WhatsApp] ❌ No se pudo persistir cola pendiente:', error);
-    }
-};
-
-const loadPendingMessages = async () => {
-    try {
-        const exists = await fs
-            .access(PENDING_MESSAGES_FILE)
-            .then(() => true)
-            .catch(() => false);
-
-        if (!exists) {
-            return;
-        }
-
-        const raw = await fs.readFile(PENDING_MESSAGES_FILE, 'utf-8');
-        const parsed = JSON.parse(raw) as Array<{ numero: string; mensaje: string; createdAt: number }>;
-
-        pendingMessages.length = 0;
-        for (const item of parsed.slice(-MAX_PENDING_MESSAGES)) {
-            if (!item?.numero || !item?.mensaje || !item?.createdAt) {
-                continue;
-            }
-
-            pendingMessages.push(item);
-        }
-
-        if (pendingMessages.length > 0) {
-            console.log(`[WhatsApp] ♻️ Cola recuperada desde disco. Pendientes: ${pendingMessages.length}`);
-        }
-    } catch (error) {
-        console.error('[WhatsApp] ❌ No se pudo cargar cola pendiente:', error);
-    }
+    // Opcional: implementar persistencia si se requiere
 };
 
 const sendMessageNow = async (numero: string, mensaje: string) => {
-    if (!whatsappClient) {
-        throw new Error('Cliente de WhatsApp no inicializado.');
-    }
-
     const numeroNormalizado = normalizePhoneForWhatsApp(numero);
-    const chatId = buildWhatsAppJid(numeroNormalizado);
     const safeMessage = String(mensaje || '').trim();
 
     if (!safeMessage) {
         throw new Error('Mensaje vacio. Se cancela envio.');
     }
 
-    if (!isWhatsappReady) {
-        throw new Error('Cliente no READY al intentar enviar.');
+    if (!isWhatsAppCloudApi) {
+        throw new Error('Solo Meta Cloud API soportado.');
     }
 
-    await whatsappClient.sendMessage(chatId, { text: safeMessage });
-    console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado}`);
-};
-
-const enqueuePendingMessage = (numero: string, mensaje: string) => {
-    if (pendingMessages.length >= MAX_PENDING_MESSAGES) {
-        pendingMessages.shift();
+    if (!WHATSAPP_API_TOKEN) {
+        throw new Error('WHATSAPP_API_TOKEN no está configurado.');
     }
 
-    pendingMessages.push({ numero, mensaje, createdAt: Date.now() });
-    console.warn(`[WhatsApp] ⏳ Mensaje en cola. Pendientes: ${pendingMessages.length}`);
-    void persistPendingMessages();
-};
-
-const flushPendingMessages = async () => {
-    if (!whatsappClient || !isWhatsappReady || pendingMessages.length === 0) {
-        return;
-    }
-
-    console.log(`[WhatsApp] ▶️ Enviando ${pendingMessages.length} mensaje(s) en cola...`);
-
-    while (pendingMessages.length > 0 && whatsappClient && isWhatsappReady) {
-        const next = pendingMessages.shift();
-        if (!next) {
-            break;
-        }
-
-        try {
-            await sendMessageNow(next.numero, next.mensaje);
-            await persistPendingMessages();
-        } catch (error) {
-            console.error('[WhatsApp] ❌ Error enviando mensaje en cola:', error);
-            pendingMessages.unshift(next);
-            await persistPendingMessages();
-            break;
-        }
-    }
-};
-
-const waitForWhatsappReady = async (timeoutMs = 45000) => {
-    if (isWhatsappReady) {
-        return;
-    }
-
-    const start = Date.now();
-    while (!isWhatsappReady && Date.now() - start < timeoutMs) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-
-    if (!isWhatsappReady) {
-        throw new Error('Cliente de WhatsApp no esta listo. Verifica sesion activa o escaneo de QR.');
-    }
-};
-
-const scheduleReconnect = (delayMs = 4000) => {
-    if (reconnectTimer) {
-        return;
-    }
-
-    reconnectScheduledAt = Date.now() + delayMs;
-
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        reconnectScheduledAt = null;
-        void startWhatsappClient();
-    }, delayMs);
-};
-
-const getReconnectDelayMs = (statusCode: number) => {
-    const attemptFactor = Math.max(0, reconnectAttempts - 1);
-    const baseDelay = statusCode === 440 ? 30000 : 4000;
-    return Math.min(MAX_RECONNECT_DELAY_MS, baseDelay * Math.pow(2, attemptFactor));
-};
-
-const clearReconnectTimer = () => {
-    if (!reconnectTimer) {
-        return;
-    }
-
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-    reconnectScheduledAt = null;
-};
-
-const clearLeaseRenewTimer = () => {
-    if (!leaseRenewTimer) {
-        return;
-    }
-
-    clearInterval(leaseRenewTimer);
-    leaseRenewTimer = null;
-};
-
-const stopWhatsappClient = async (reason: string) => {
-    const currentClient = whatsappClient;
-
-    whatsappClient = null;
-    isWhatsappReady = false;
-    ownJidUser = null;
-
-    if (!currentClient) {
-        return;
-    }
-
-    try {
-        (currentClient as any).ev?.removeAllListeners?.();
-        (currentClient as any).end?.(undefined);
-    } catch (error) {
-        console.warn(`[WhatsApp] ⚠️ Error cerrando cliente (${reason}):`, error);
-    }
-};
-
-const releaseWhatsappSessionLease = async (reason: string) => {
-    clearLeaseRenewTimer();
-
-    if (!isWhatsappLeaseHeld) {
-        return;
-    }
-
-    isWhatsappLeaseHeld = false;
-
-    const released = await releaseBaileysSessionLease();
-    if (released) {
-        console.log(`[WhatsApp] 🔓 Lease de sesion liberado (${reason}).`);
-    }
-};
-
-const startWhatsappLeaseHeartbeat = () => {
-    if (!isWhatsappLeaseHeld || leaseRenewTimer) {
-        return;
-    }
-
-    leaseRenewTimer = setInterval(() => {
-        if (isRenewingWhatsappLease) {
-            return;
-        }
-
-        isRenewingWhatsappLease = true;
-
-        void (async () => {
-            try {
-                const renewed = await renewBaileysSessionLease(WHATSAPP_SESSION_LEASE_TTL_MS);
-
-                if (!renewed) {
-                    console.error('[WhatsApp] ❌ Lease de sesion perdido. Se detiene cliente para evitar doble inicializacion.');
-                    clearLeaseRenewTimer();
-                    isWhatsappLeaseHeld = false;
-                    await stopWhatsappClient('lease-lost');
-                    scheduleReconnect(WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
-                }
-            } catch (error) {
-                console.error('[WhatsApp] ⚠️ Error renovando lease de sesion:', error);
-            } finally {
-                isRenewingWhatsappLease = false;
-            }
-        })();
-    }, WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
-
-    (leaseRenewTimer as NodeJS.Timeout).unref?.();
-};
-
-const ensureWhatsappSessionLease = async () => {
-    if (isWhatsappLeaseHeld) {
-        return true;
-    }
-
-    const acquired = await acquireBaileysSessionLease(WHATSAPP_SESSION_LEASE_TTL_MS);
-    if (!acquired) {
-        console.warn('[WhatsApp] ⏸️ Otra instancia mantiene el lease de sesion. Se pospone la inicializacion local.');
-        return false;
-    }
-
-    isWhatsappLeaseHeld = true;
-    console.log('[WhatsApp] 🔐 Lease de sesion adquirido en PostgreSQL.');
-    startWhatsappLeaseHeartbeat();
-    return true;
-};
-
-let processExitHandlersRegistered = false;
-
-const registerProcessExitHandlers = () => {
-    if (processExitHandlersRegistered) {
-        return;
-    }
-
-    processExitHandlersRegistered = true;
-
-    const shutdown = (signal: string) => {
-        void (async () => {
-            console.log(`[WhatsApp] 🛑 Shutdown detectado (${signal}). Liberando recursos...`);
-            clearReconnectTimer();
-            await stopWhatsappClient(`shutdown:${signal}`);
-            await releaseWhatsappSessionLease(`shutdown:${signal}`);
-            process.exit(0);
-        })();
-    };
-
-    process.once('SIGINT', () => shutdown('SIGINT'));
-    process.once('SIGTERM', () => shutdown('SIGTERM'));
-    process.once('beforeExit', () => {
-        void releaseWhatsappSessionLease('beforeExit');
+    const response = await fetch(WHATSAPP_API_ENDPOINT, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${WHATSAPP_API_TOKEN}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            to: numeroNormalizado,
+            type: 'text',
+            text: { body: safeMessage }
+        })
     });
+
+    if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`WhatsApp Cloud API error ${response.status}: ${body}`);
+    }
+
+    isWhatsappReady = true;
+    console.log(`[WhatsApp] 🚀 Mensaje enviado con éxito a: ${numeroNormalizado} via Meta Cloud API`);
+    return;
 };
-
-const startWhatsappClient = async () => {
-    if (isWhatsappReady && whatsappClient) {
-        return;
-    }
-
-    if (isStartingWhatsappClient) {
-        return;
-    }
-
-    isStartingWhatsappClient = true;
-
-    try {
-        const leaseReady = await ensureWhatsappSessionLease();
-        if (!leaseReady) {
-            scheduleReconnect(WHATSAPP_SESSION_LEASE_RENEW_INTERVAL_MS);
-            return;
-        }
-
-        const { state, saveCreds, locationLabel } = await createBaileysAuthStore();
-        console.log('[WhatsApp] Obteniendo version de Baileys...');
-        let version: [number, number, number];
-        try {
-            const result = await Promise.race([
-                fetchLatestBaileysVersion(),
-                new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error('fetchLatestBaileysVersion timeout')), 15000)
-                )
-            ]);
-            version = result.version as [number, number, number];
-            console.log('[WhatsApp] Version obtenida:', version.join('.'));
-        } catch (versionError) {
-            version = [2, 3000, 1015901307];
-            console.warn('[WhatsApp] ⚠️ No se pudo obtener version de Baileys, usando fallback:', version.join('.'));
-        }
-
-        const previousClient = whatsappClient;
-        const currentClient = makeWASocket({
-            auth: state,
-            version,
-            logger: baileysLogger as any,
-            printQRInTerminal: false,
-            markOnlineOnConnect: false,
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 30000,
-            syncFullHistory: false,
-            fireInitQueries: false,
-            shouldIgnoreJid: (jid) => {
-                if (!jid) {
-                    return false;
-                }
-
-                if (jid.endsWith('@g.us')) {
-                    return true;
-                }
-
-                const incomingUser = normalizeJidUser(jid);
-                if (ownJidUser && incomingUser && incomingUser === ownJidUser) {
-                    return true;
-                }
-
-                return false;
-            }
-        });
-
-        if (previousClient && previousClient !== currentClient) {
-            try {
-                (previousClient as any).ev?.removeAllListeners?.();
-                (previousClient as any).end?.(undefined);
-            } catch (_error) {
-                // Ignora errores de limpieza de sockets antiguos.
-            }
-        }
-
-        whatsappClient = currentClient;
-
-        currentClient.ev.on('creds.update', () => {
-            void saveCreds();
-            console.log(`[WhatsApp] 💾 Sesion actualizada en ${locationLabel}`);
-        });
-
-        currentClient.ev.on('connection.update', (update) => {
-            if (whatsappClient !== currentClient) {
-                return;
-            }
-
-            const { connection, lastDisconnect, qr } = update;
-
-            if (qr) {
-                hasAuthSignal = true;
-                console.log('\n=========================================');
-                console.log('📱 ESCANEA ESTE CÓDIGO QR CON TU WHATSAPP');
-                console.log('=========================================\n');
-                console.log('[WhatsApp] QR (texto):', qr);
-                console.log('[WhatsApp] QR URL:', `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qr)}`);
-            }
-
-            if (connection === 'open') {
-                hasAuthSignal = true;
-                isWhatsappReady = true;
-                reconnectAttempts = 0;
-                lastReadyAt = Date.now();
-                ownJidUser = normalizeJidUser(currentClient.user?.id || null);
-                clearReconnectTimer();
-                console.log('✅ Módulo de WhatsApp conectado y listo para disparar.');
-                void flushPendingMessages();
-            }
-
-            if (connection === 'close') {
-                isWhatsappReady = false;
-                const statusCode = Number((lastDisconnect?.error as any)?.output?.statusCode);
-                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-                const isConnectionReplaced = statusCode === 440;
-                lastDisconnectCode = Number.isFinite(statusCode) ? statusCode : null;
-                lastDisconnectAt = Date.now();
-
-                console.error('[WhatsApp] ⚠️ Cliente desconectado. Codigo:', statusCode || 'desconocido');
-
-                if (isLoggedOut) {
-                    reconnectAttempts = 0;
-                    console.error('[WhatsApp] Sesion cerrada (401). Borrando credenciales y solicitando nuevo QR...');
-                    void clearBaileysAuthStore().then(() => scheduleReconnect(2000));
-                } else {
-                    reconnectAttempts += 1;
-                    const reconnectDelayMs = getReconnectDelayMs(statusCode);
-
-                    if (isConnectionReplaced) {
-                        console.warn(
-                            `[WhatsApp] ⚠️ Conexion reemplazada (440). Reintento ${reconnectAttempts} en ${Math.round(
-                                reconnectDelayMs / 1000
-                            )}s para evitar loop...`
-                        );
-                    } else {
-                        console.log(
-                            `[WhatsApp] Reintentando conexion... intento ${reconnectAttempts} en ${Math.round(
-                                reconnectDelayMs / 1000
-                            )}s`
-                        );
-                    }
-
-                    scheduleReconnect(reconnectDelayMs);
-                }
-            }
-        });
-
-        console.log(`[WhatsApp] Inicializando cliente y esperando QR/autenticacion... (auth store: ${locationLabel})`);
-
-        setTimeout(() => {
-            if (!hasAuthSignal && !isWhatsappReady) {
-                console.error('[WhatsApp] ⚠️ No se recibio QR ni ready en 90s. Revisa logs y estado de red de Render.');
-            }
-        }, 90000);
-    } catch (error) {
-        isWhatsappReady = false;
-        console.error('[WhatsApp] ❌ Error inicializando Baileys:', error);
-        scheduleReconnect(5000);
-    } finally {
-        isStartingWhatsappClient = false;
-    }
-};
-
-void (async () => {
-    await loadPendingMessages();
-    registerProcessSafetyHandlers();
-    registerProcessExitHandlers();
-    await startWhatsappClient();
-})();
 
 export const enviarMensajeWhatsApp = async (numero: string, mensaje: string) => {
-    return enviarMensajeWhatsAppModo(numero, mensaje, false);
+    await sendMessageNow(numero, mensaje);
 };
+
 
 export const enviarMensajeWhatsAppModo = async (
     numero: string,
     mensaje: string,
     requireImmediateDelivery = false
 ) => {
-    try {
-        const numeroNormalizado = normalizePhoneForWhatsApp(numero);
-        const mensajeSimple = String(mensaje || '').trim();
+    await enviarMensajeWhatsApp(numero, mensaje);
+};
 
-        if (!mensajeSimple) {
-            console.error('[WhatsApp] ❌ Mensaje vacio. No se envia.');
-            return;
-        }
-
-        if (!whatsappClient || !isWhatsappReady) {
-            if (requireImmediateDelivery) {
-                throw new Error('Cliente de WhatsApp no READY para entrega inmediata.');
-            }
-
-            enqueuePendingMessage(numeroNormalizado, mensajeSimple);
-            return;
-        }
-
-        await waitForWhatsappReady(15000);
-        await sendMessageNow(numeroNormalizado, mensajeSimple);
-    } catch (error) {
-        console.error('[WhatsApp] ❌ Error enviando el mensaje:', error);
-        throw error;
-    }
+// Health check para WhatsApp Cloud API
+export const getWhatsAppHealth = () => {
+    return {
+        ready: isWhatsappReady,
+        pendingMessages: pendingMessages.length,
+        maxPending: MAX_PENDING_MESSAGES,
+        mode: 'Meta Cloud API',
+        endpoint: WHATSAPP_API_ENDPOINT ? 'set' : 'unset'
+    };
 };
