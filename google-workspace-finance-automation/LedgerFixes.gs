@@ -1,3 +1,78 @@
+// ─── MEJORA-7: Backfill GerenciaRol vacío en Libro_Mayor ─────────────────────
+
+/**
+ * Rellena GerenciaRol (columna 23, índice 22) en todas las filas del
+ * Libro_Mayor donde el campo está vacío, usando la misma lógica que
+ * LedgerService.resolveGerenciaRol_().
+ * Seguro de re-ejecutar: solo toca filas con GerenciaRol en blanco.
+ */
+function backfillGerenciaRol() {
+  var GERENCIA_MAP = {
+    'Ventas':                'Comercial',
+    'TECNOLOGIA_Y_SOFTWARE': 'Operaciones',
+    'LEGAL_Y_COMPLIANCE':    'Legal',
+    'Servicios':             'Operaciones',
+    'MARKETING':             'Comercial',
+    'LOGISTICA':             'Operaciones'
+  };
+
+  function resolve(categoria) {
+    var cat = String(categoria || '').trim();
+    return GERENCIA_MAP[cat.toUpperCase()] || GERENCIA_MAP[cat] || 'Finanzas';
+  }
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName(FinanceConfig.SHEETS.LEDGER);
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('❌ Hoja "Libro_Mayor" no encontrada.');
+    return;
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('ℹ️ Libro_Mayor sin datos.');
+    return;
+  }
+
+  // Leer columnas Categoria (col 4, índice 3) y GerenciaRol (col 23, índice 22)
+  var dataRows = lastRow - 1;
+  var categorias   = sheet.getRange(2, 4,  dataRows, 1).getValues(); // col D
+  var gerenciaVals = sheet.getRange(2, 23, dataRows, 1).getValues(); // col W
+
+  var updated = 0;
+  for (var i = 0; i < dataRows; i++) {
+    var current = String(gerenciaVals[i][0] || '').trim();
+    if (current !== '') continue; // ya tiene valor, no tocar
+
+    var newVal = resolve(categorias[i][0]);
+    sheet.getRange(i + 2, 23).setValue(newVal);
+    updated++;
+  }
+
+  SpreadsheetApp.flush();
+
+  var msg = [
+    '✅ backfillGerenciaRol completado',
+    '',
+    'Filas actualizadas: ' + updated,
+    'Filas ya con valor: ' + (dataRows - updated),
+    '',
+    'Mapa aplicado:',
+    '  Ventas                → Comercial',
+    '  TECNOLOGIA_Y_SOFTWARE → Operaciones',
+    '  LEGAL_Y_COMPLIANCE    → Legal',
+    '  Servicios / LOGISTICA → Operaciones',
+    '  (resto)               → Finanzas'
+  ].join('\n');
+
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+
+  AuditService.logInfo('LedgerFixes.backfillGerenciaRol',
+    'GerenciaRol rellenado en ' + updated + ' filas');
+}
+
 // ─── MEJORA-3: Configuración de ventana de deduplicación de incidentes ────────
 
 /**
