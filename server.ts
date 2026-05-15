@@ -1,3 +1,5 @@
+
+
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -10,9 +12,14 @@ import {
   PersistedRecoveryStatus,
   recordRecoveryEvent
 } from './recovery-store';
-import { enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
+import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
 
 dotenv.config();
+
+const app = express();
+app.use(express.json());
+
+
 
 // ─── LOGGING ESTRUCTURADO ──────────────────────────────────────────────────────
 type LogSeverity = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL';
@@ -32,17 +39,15 @@ const structuredLog = (
     ...(data && { data })
   };
 
-  // Log a stdout para que Render lo capture
   console.log(JSON.stringify(logEntry));
 
-  // También log legible para desarrollo local
   if (process.env.NODE_ENV !== 'production') {
     const severityColor: Record<LogSeverity, string> = {
-      DEBUG: '\x1b[36m',    // Cyan
-      INFO: '\x1b[32m',     // Green
-      WARN: '\x1b[33m',     // Yellow
-      ERROR: '\x1b[31m',    // Red
-      CRITICAL: '\x1b[41m'  // Red background
+      DEBUG: '\x1b[36m',
+      INFO: '\x1b[32m',
+      WARN: '\x1b[33m',
+      ERROR: '\x1b[31m',
+      CRITICAL: '\x1b[41m'
     };
     const reset = '\x1b[0m';
     const color = severityColor[severity] || '';
@@ -51,35 +56,21 @@ const structuredLog = (
 };
 
 // ─── CONFIGURACIÓN GLOBAL ─────────────────────────────────────────────────────
-// Edita aquí o define en .env para cambiar sin tocar lógica.
-
-/** Permalink de checkout directo al producto de alto ticket de VITTOSTORE. */
 const CHECKOUT_URL_LUXURY =
   process.env.CHECKOUT_URL_LUXURY ?? 'https://vittostore.store/cart/51578668482848:1';
 
-/**
- * Tiempo (en segundos) que debe haber pasado desde el abandono antes de disparar.
- * También define la ventana de deduplicación: no se envía dos veces al mismo
- * checkout dentro de este intervalo.
- */
 const ABANDONED_CHECKOUT_TIMEOUT_S =
   Number(process.env.ABANDONED_CHECKOUT_TIMEOUT_S ?? 3600);
 
-/**
- * Canal de mensajería. Actualmente se usa Baileys (WhatsApp directo via QR).
- * Si en el futuro migras a la API oficial de Meta, actualiza este valor y el
- * módulo whatsapp.ts para reflejarlo.
- */
 const WHATSAPP_API_ENDPOINT =
   process.env.WHATSAPP_API_ENDPOINT ?? 'baileys://local';
+const WHATSAPP_API_TOKEN = process.env.WHATSAPP_API_TOKEN ?? '';
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID ?? '';
+const WHATSAPP_IS_CLOUD_API = WHATSAPP_API_ENDPOINT.startsWith('https://');
 const WA_RETRY_BASE_DELAY_MS = Number(process.env.WA_RETRY_BASE_DELAY_MS ?? 5000);
 const QUEUE_ALERT_THRESHOLD = Number(process.env.QUEUE_ALERT_THRESHOLD ?? 20);
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET ?? '';
 
-/**
- * Construye el cuerpo del mensaje de recuperación con tono de lujo.
- * Recibe el nombre del cliente y la URL de checkout a usar.
- */
 const MESSAGE_TEMPLATE = (customerFirstName: string, checkoutUrl: string): string =>
   `¡Hola ${customerFirstName}! 👋
 
@@ -99,14 +90,6 @@ type RecoveryTracking = {
   updatedAt: number;
 };
 
-// ─── ESTADO DE RECUPERACIÓN ───────────────────────────────────────────────────
-/**
- * RECOVERY_STATUS_TRACKING: Map en memoria que actúa como registro de envíos.
- * Clave: dedupeKey del checkout. Valor: timestamp del primer envío.
- * Impide reenviar el mensaje al mismo cliente dentro de ABANDONED_CHECKOUT_TIMEOUT_S.
- * En el futuro puedes reemplazar este Map por una tabla en base de datos
- * para persistencia entre reinicios.
- */
 const RECOVERY_STATUS_TRACKING = new Map<string, number>();
 const MESSAGE_TRACKER = new Map<string, RecoveryTracking>();
 const WA_TASK_QUEUE: Array<() => Promise<void>> = [];
@@ -114,14 +97,16 @@ const WA_MAX_ATTEMPTS = 3;
 let isQueueWorkerRunning = false;
 let isQueueAlertActive = false;
 
-// ─── APP ──────────────────────────────────────────────────────────────────────
-const app = express();
+// const app = express(); // Eliminada duplicada
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const WEBHOOK_DEDUPE_WINDOW_MS = ABANDONED_CHECKOUT_TIMEOUT_S * 1000;
 
 console.log(`[Config] CHECKOUT_URL_LUXURY     = ${CHECKOUT_URL_LUXURY}`);
 console.log(`[Config] ABANDONED_CHECKOUT_TIMEOUT_S = ${ABANDONED_CHECKOUT_TIMEOUT_S}s`);
 console.log(`[Config] WHATSAPP_API_ENDPOINT   = ${WHATSAPP_API_ENDPOINT}`);
+console.log(`[Config] WHATSAPP_API_TOKEN set = ${WHATSAPP_API_TOKEN ? 'yes' : 'no'}`);
+console.log(`[Config] WHATSAPP_PHONE_NUMBER_ID = ${WHATSAPP_PHONE_NUMBER_ID}`);
+console.log(`[Config] WHATSAPP_MODE = ${WHATSAPP_IS_CLOUD_API ? 'Meta Cloud API' : 'Baileys local'}`);
 console.log(`[Config] WA_RETRY_BASE_DELAY_MS = ${WA_RETRY_BASE_DELAY_MS}ms`);
 console.log(`[Config] QUEUE_ALERT_THRESHOLD  = ${QUEUE_ALERT_THRESHOLD}`);
 
@@ -139,214 +124,49 @@ const hasValidShopifyHmac = (req: RequestWithRawBody) => {
 
   const digest = crypto
     .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-    .update(req.rawBody)
+    .update(req.rawBody?.toString('utf8') ?? '', 'utf8')
     .digest('base64');
 
-  const headerBuffer = Buffer.from(hmacHeader, 'utf8');
-  const digestBuffer = Buffer.from(digest, 'utf8');
-
-  if (headerBuffer.length !== digestBuffer.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(headerBuffer, digestBuffer);
-};
-
-const normalizePhone = (raw: string) => {
-  let cleaned = raw.replace(/\D/g, '');
-
-  if (cleaned.length === 9 && cleaned.startsWith('9')) {
-    cleaned = `56${cleaned}`;
-    console.log(`🔧 Autocorrección de número aplicada: ${cleaned}`);
-  }
-
-  return cleaned;
+  return digest === hmacHeader;
 };
 
 const isValidPhoneForWhatsApp = (phone: string) => /^\d{11,15}$/.test(phone);
 
-const isValidRecoveryUrl = (value: unknown) => {
-  if (typeof value !== 'string') {
-    return false;
-  }
+const normalizePhoneNumber = (raw: string) => {
+  const cleaned = String(raw || '')
+    .replace(/\+/g, '')
+    .replace(/\D/g, '')
+    .slice(-11);
 
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  // Evita links de pruebas/manuales que no abren checkout real.
-  const blockedSnippets = ['example.com', 'test-vittostore-recovery', '/test'];
-  if (blockedSnippets.some((snippet) => trimmed.toLowerCase().includes(snippet))) {
-    return false;
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.protocol === 'https:';
-  } catch (_error) {
-    return false;
-  }
-};
-
-const markAndCheckDuplicate = (key: string) => {
-  const now = Date.now();
-
-  // Limpia entradas expiradas del registro de recuperación.
-  for (const [trackedKey, timestamp] of RECOVERY_STATUS_TRACKING.entries()) {
-    if (now - timestamp > WEBHOOK_DEDUPE_WINDOW_MS) {
-      RECOVERY_STATUS_TRACKING.delete(trackedKey);
-    }
-  }
-
-  const existing = RECOVERY_STATUS_TRACKING.get(key);
-  if (existing && now - existing <= WEBHOOK_DEDUPE_WINDOW_MS) {
-    return true; // Ya se envió dentro de la ventana → duplicado.
-  }
-
-  RECOVERY_STATUS_TRACKING.set(key, now);
-  return false;
-};
-
-const wasRecentlyPersisted = async (dedupeKey: string) => {
-  const event = await findRecoveryEventByDedupeKey(dedupeKey);
-  if (!event) {
-    return false;
-  }
-
-  const updatedAtMs = new Date(event.updatedAt).getTime();
-  const isInsideWindow = Date.now() - updatedAtMs <= WEBHOOK_DEDUPE_WINDOW_MS;
-  if (!isInsideWindow) {
-    return false;
-  }
-
-  // Only states that indicate an in-progress or completed send path should dedupe.
-  return ['queued', 'sent', 'duplicate'].includes(event.status);
-};
-
-const parseTotalPrice = (value: unknown) => {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const normalized = value.trim().replace(',', '.');
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
-const setMessageTracking = (
-  dedupeKey: string,
-  status: RecoveryStatus,
-  attempts: number,
-  lastError?: string
-) => {
-  MESSAGE_TRACKER.set(dedupeKey, {
-    status,
-    attempts,
-    lastError,
-    updatedAt: Date.now()
-  });
-};
-
-const mapStatusToPersistence = (status: RecoveryStatus): PersistedRecoveryStatus => {
-  switch (status) {
-    case 'sent':
-      return 'sent';
-    case 'failed':
-      return 'failed';
-    case 'duplicate':
-      return 'duplicate';
-    case 'skipped':
-      return 'skipped';
-    default:
-      return 'queued';
-  }
-};
-
-const persistRecoveryState = (input: {
-  dedupeKey: string;
-  status: RecoveryStatus;
-  attempts?: number;
-  phone?: string | null;
-  customerName?: string | null;
-  checkoutUrl?: string | null;
-  lastError?: string;
-  sentAt?: Date;
-}) => {
-  void recordRecoveryEvent({
-    dedupeKey: input.dedupeKey,
-    status: mapStatusToPersistence(input.status),
-    attempts: input.attempts,
-    phone: input.phone,
-    customerName: input.customerName,
-    checkoutUrl: input.checkoutUrl,
-    lastError: input.lastError,
-    sentAt: input.sentAt
-  });
-};
-
-const persistRecoveryLog = (input: {
-  dedupeKey: string;
-  level: 'info' | 'warn' | 'error';
-  stage: string;
-  message: string;
-  payload?: Record<string, unknown>;
-}) => {
-  void appendRecoveryLog({
-    dedupeKey: input.dedupeKey,
-    level: input.level,
-    stage: input.stage,
-    message: input.message,
-    payload: input.payload as any
-  });
-};
-
-const runQueueWorker = async () => {
-  if (isQueueWorkerRunning) {
-    return;
-  }
-
-  isQueueWorkerRunning = true;
-
-  try {
-    while (WA_TASK_QUEUE.length > 0) {
-      const nextTask = WA_TASK_QUEUE.shift();
-      if (!nextTask) {
-        break;
-      }
-
-      await nextTask();
-    }
-  } finally {
-    isQueueWorkerRunning = false;
-  }
+  return cleaned;
 };
 
 const enqueueWhatsAppTask = (task: () => Promise<void>) => {
   WA_TASK_QUEUE.push(task);
 
-  if (!isQueueAlertActive && WA_TASK_QUEUE.length > QUEUE_ALERT_THRESHOLD) {
-    isQueueAlertActive = true;
-    console.error(
-      `[QUEUE] 🚨 Cola sobre umbral (${WA_TASK_QUEUE.length}). Revisa conexión de WhatsApp o estado de Baileys.`
-    );
-    persistRecoveryLog({
-      dedupeKey: 'system_queue_alert',
-      level: 'error',
-      stage: 'queue_threshold_exceeded',
-      message: 'La cola de WhatsApp superó el umbral configurado',
-      payload: {
-        pendingTasks: WA_TASK_QUEUE.length,
-        threshold: QUEUE_ALERT_THRESHOLD
-      }
-    });
+  if (WA_TASK_QUEUE.length > QUEUE_ALERT_THRESHOLD) {
+    if (!isQueueAlertActive) {
+      isQueueAlertActive = true;
+      structuredLog(
+        'WARN',
+        'queue_alert',
+        `[QUEUE] 🚨 Cola sobre umbral (${WA_TASK_QUEUE.length}). Revisa conexión de WhatsApp.`,
+        {
+          queueLength: WA_TASK_QUEUE.length,
+          threshold: QUEUE_ALERT_THRESHOLD
+        }
+      );
+      // Solo pasar propiedades válidas
+      recordRecoveryEvent({
+        dedupeKey: 'queue_alert',
+        status: 'queued'
+      }).catch(() => {});
+    }
   }
 
-  void runQueueWorker();
+  if (!isQueueWorkerRunning) {
+    void processWhatsAppQueue();
+  }
 };
 
 const scheduleWhatsAppSend = (
@@ -358,402 +178,336 @@ const scheduleWhatsAppSend = (
   enqueueWhatsAppTask(async () => {
     try {
       await enviarMensajeWhatsAppModo(numeroLimpio, mensaje, true);
-      setMessageTracking(dedupeKey, 'sent', attempt);
-      persistRecoveryState({
+
+      let tracking = MESSAGE_TRACKER.get(dedupeKey);
+      if (!tracking) {
+        tracking = {
+          status: 'queued',
+          attempts: 0,
+          updatedAt: Date.now()
+        };
+      }
+      tracking.status = 'sent';
+      tracking.attempts = attempt;
+      tracking.updatedAt = Date.now();
+      MESSAGE_TRACKER.set(dedupeKey, tracking);
+
+      structuredLog('INFO', 'send_success', 'Mensaje enviado exitosamente', {
         dedupeKey,
-        status: 'sent',
-        attempts: attempt,
-        phone: numeroLimpio,
-        sentAt: new Date()
-      });
-      persistRecoveryLog({
-        dedupeKey,
-        level: 'info',
-        stage: 'send_success',
-        message: `Mensaje enviado correctamente en intento ${attempt}`
-      });
-      structuredLog('INFO', 'send_success', 'Mensaje de WhatsApp enviado exitosamente', {
-        dedupeKey,
-        numeroLimpio,
+        numero: numeroLimpio,
         attempt
       });
-      console.log(`[QUEUE] ✅ Envío exitoso para ${dedupeKey} (intento ${attempt}).`);
+
+      await recordRecoveryEvent({
+        dedupeKey,
+        status: 'sent'
+      });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      setMessageTracking(dedupeKey, 'failed', attempt, errorMessage);
-      persistRecoveryState({
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      let tracking = MESSAGE_TRACKER.get(dedupeKey);
+      if (!tracking) {
+        tracking = {
+          status: 'queued',
+          attempts: 0,
+          updatedAt: Date.now()
+        };
+      }
+      const severity: LogSeverity = attempt >= WA_MAX_ATTEMPTS ? 'ERROR' : 'WARN';
+      structuredLog(severity, 'send_failed', `Fallo en envío (intento ${attempt}/${WA_MAX_ATTEMPTS})`, {
         dedupeKey,
-        status: 'failed',
-        attempts: attempt,
-        phone: numeroLimpio,
-        lastError: errorMessage
-      });
-      persistRecoveryLog({
-        dedupeKey,
-        level: 'error',
-        stage: 'send_failed',
-        message: `Error enviando mensaje en intento ${attempt}`,
-        payload: { error: errorMessage }
-      });
-      const severity = attempt >= WA_MAX_ATTEMPTS ? 'ERROR' : 'WARN';
-      structuredLog(severity, 'send_failed', `Fallo en envío de WhatsApp (intento ${attempt}/${WA_MAX_ATTEMPTS})`, {
-        dedupeKey,
-        numeroLimpio,
+        numero: numeroLimpio,
         attempt,
-        error: errorMessage,
-        maxAttempts: WA_MAX_ATTEMPTS
+        error: errorMsg
       });
-      console.error(`[QUEUE] ❌ Error en ${dedupeKey} (intento ${attempt}): ${errorMessage}`);
+      tracking.status = 'failed';
+      tracking.attempts = attempt;
+      tracking.updatedAt = Date.now();
+      MESSAGE_TRACKER.set(dedupeKey, tracking);
 
       if (attempt < WA_MAX_ATTEMPTS) {
-        const retryDelayMs = attempt * WA_RETRY_BASE_DELAY_MS;
-        persistRecoveryLog({
-          dedupeKey,
-          level: 'warn',
-          stage: 'retry_scheduled',
-          message: `Reintento programado para intento ${attempt + 1}`,
-          payload: { retryDelayMs }
-        });
-        structuredLog('WARN', 'retry_scheduled', `Reintento programado para mensaje`, {
-          dedupeKey,
-          attempt: attempt + 1,
-          retryDelayMs
-        });
+        const delayMs = WA_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
         setTimeout(() => {
           scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje, attempt + 1);
-        }, retryDelayMs);
+        }, delayMs);
       }
     }
   });
+};
+
+const processWhatsAppQueue = async () => {
+  if (isQueueWorkerRunning) {
+    return;
+  }
+
+  isQueueWorkerRunning = true;
+
+  while (WA_TASK_QUEUE.length > 0) {
+    const task = WA_TASK_QUEUE.shift();
+    if (task) {
+      try {
+        await task();
+      } catch (error) {
+        console.error('[Queue] Error:', error);
+      }
+    }
+  }
+
+  isQueueWorkerRunning = false;
+  isQueueAlertActive = false;
 };
 
 app.use(cors());
 app.use(
   express.json({
-    verify: (req, _res, buf) => {
-      (req as RequestWithRawBody).rawBody = Buffer.from(buf);
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
     }
   })
 );
 
-app.get('/', (_req: Request, res: Response) => {
-  res.type('text/plain').send('👑 El Oráculo de VITTOSTORE está en línea y operando.');
+// Endpoint de prueba: POST /test-meta (registrado después de los middlewares)
+app.post('/test-meta', async (req, res) => {
+  const { numero, mensaje } = req.body;
+  if (!numero || !mensaje) {
+    return res.status(400).json({ error: 'Faltan parametros: numero y mensaje' });
+  }
+  try {
+    await enviarMensajeWhatsApp(numero, mensaje);
+    res.json({ ok: true, numero, mensaje });
+  } catch (error) {
+    res.status(500).json({ error: error?.toString?.() || 'Error enviando mensaje' });
+  }
 });
 
-// ─── MONITOREO: Calcula alertas críticas ─────────────────────────────────────
-const calculateHealthAlerts = (
-  queuePending: number,
-  waReady: boolean,
-  waReconnectAttempts: number,
-  trackingFailed: number
-) => {
-  const alerts: string[] = [];
-  
-  // Alerta 1: Queue saturation
-  if (queuePending > QUEUE_ALERT_THRESHOLD) {
-    alerts.push(`QUEUE_SATURATED: ${queuePending} > ${QUEUE_ALERT_THRESHOLD}`);
-  }
-  
-  // Alerta 2: WhatsApp desconectado
-  if (!waReady) {
-    alerts.push('WHATSAPP_DISCONNECTED: Session no está en estado "open"');
-  }
-  
-  // Alerta 3: Reconnect loop
-  if (waReconnectAttempts > 3) {
-    alerts.push(`RECONNECT_LOOP: ${waReconnectAttempts} intentos en ventana activa`);
-  }
-  
-  // Alerta 4: Failed messages
-  if (trackingFailed > 5) {
-    alerts.push(`DELIVERY_FAILURES: ${trackingFailed} mensajes fallidos`);
-  }
-  
-  return {
-    hasAlerts: alerts.length > 0,
-    count: alerts.length,
-    messages: alerts
-  };
-};
+// Endpoint temporal para listar rutas activas
+app.get('/routes', (req, res) => {
+  const routes: any[] = [];
+  app._router.stack.forEach((middleware: any) => {
+    if (middleware.route) {
+      routes.push({
+        method: Object.keys(middleware.route.methods)[0].toUpperCase(),
+        path: middleware.route.path
+      });
+    } else if (middleware.name === 'router') {
+      middleware.handle.stack.forEach((handler: any) => {
+        if (handler.route) {
+          routes.push({
+            method: Object.keys(handler.route.methods)[0].toUpperCase(),
+            path: handler.route.path
+          });
+        }
+      });
+    }
+  });
+  res.json(routes);
+});
 
-app.get('/health', async (_req: Request, res: Response) => {
+app.get('/health', async (_req, res) => {
+  const recoveryHealth = await getRecoveryStoreHealth();
   const wa = getWhatsAppHealth();
-  const persistence = getRecoveryStoreHealth();
-  const tracked = Array.from(MESSAGE_TRACKER.values());
-  const memorySnapshot = {
-    trackedKeys: MESSAGE_TRACKER.size,
-    sent: tracked.filter((item) => item.status === 'sent').length,
-    failed: tracked.filter((item) => item.status === 'failed').length,
-    duplicate: tracked.filter((item) => item.status === 'duplicate').length,
-    skipped: tracked.filter((item) => item.status === 'skipped').length
-  };
 
-  const persistedSnapshot = await getPersistedTrackingSnapshot();
-  const trackingSnapshot = persistedSnapshot
-    ? {
-        trackedKeys: persistedSnapshot.trackedKeys,
-        sent: persistedSnapshot.sent,
-        failed: persistedSnapshot.failed,
-        duplicate: persistedSnapshot.duplicate,
-        skipped: persistedSnapshot.skipped,
-        source: 'persistence'
-      }
-    : {
-        ...memorySnapshot,
-        source: 'memory'
-      };
+  const alerts: string[] = [];
 
-  const queueTotalPending = WA_TASK_QUEUE.length + wa.pendingMessages;
-  const alerts = calculateHealthAlerts(
-    queueTotalPending,
-    wa.ready,
-    wa.reconnectAttempts,
-    trackingSnapshot.failed
-  );
+  if ((recoveryHealth as any).databaseConnected === false) {
+    alerts.push('DATABASE_DISCONNECTED');
+  }
 
-  res.status(200).json({
-    ok: true,
-    healthy: !alerts.hasAlerts,
+  if (!wa.ready) {
+    alerts.push('WHATSAPP_DISCONNECTED');
+  }
+
+  if (WA_TASK_QUEUE.length > QUEUE_ALERT_THRESHOLD) {
+    alerts.push(`QUEUE_OVERLOAD: ${WA_TASK_QUEUE.length}`);
+  }
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     alerts,
-    uptimeSeconds: Math.floor(process.uptime()),
     whatsapp: wa,
-    persistence,
-    recoveryTrackedKeys: RECOVERY_STATUS_TRACKING.size,
-    queue: {
-      pendingTasks: WA_TASK_QUEUE.length,
-      pendingWhatsAppMessages: wa.pendingMessages,
-      totalPending: queueTotalPending,
-      workerRunning: isQueueWorkerRunning,
-      alertActive: isQueueAlertActive,
-      alertThreshold: QUEUE_ALERT_THRESHOLD
-    },
-    tracking: {
-      trackedKeys: trackingSnapshot.trackedKeys,
-      sent: trackingSnapshot.sent,
-      failed: trackingSnapshot.failed,
-      duplicate: trackingSnapshot.duplicate,
-      skipped: trackingSnapshot.skipped,
-      source: trackingSnapshot.source
-    },
-    config: {
-      checkoutUrlLuxury: CHECKOUT_URL_LUXURY,
-      abandonedCheckoutTimeoutS: ABANDONED_CHECKOUT_TIMEOUT_S,
-      whatsappApiEndpoint: WHATSAPP_API_ENDPOINT,
-      waRetryBaseDelayMs: WA_RETRY_BASE_DELAY_MS,
-      queueAlertThreshold: QUEUE_ALERT_THRESHOLD
-    },
-    integrity: {
-      dedupeWindowMs: WEBHOOK_DEDUPE_WINDOW_MS,
-      inMemoryDedupeKeys: RECOVERY_STATUS_TRACKING.size,
-      lastDisconnectCode: wa.lastDisconnectCode,
-      reconnectAttempts: wa.reconnectAttempts,
-      reconnectScheduledInSeconds: wa.reconnectScheduledInSeconds
-    },
-    timestamp: new Date().toISOString()
+    queueLength: WA_TASK_QUEUE.length
   });
 });
 
-app.post('/api/webhooks/shopify/checkout', async (req: Request, res: Response) => {
+app.post('/webhook', async (req: RequestWithRawBody, res) => {
   try {
-    if (!hasValidShopifyHmac(req as RequestWithRawBody)) {
-      console.error('[Security] ❌ Firma HMAC inválida para webhook de Shopify.');
-      return res.status(401).send('Firma de webhook inválida');
+    if (!hasValidShopifyHmac(req)) {
+      return res.status(401).json({ error: 'Invalid HMAC' });
     }
 
     const body = req.body;
-
-    const firstName = body?.customer?.first_name || 'Cliente';
-    const phone = body?.customer?.phone || body?.shipping_address?.phone || null;
-    const recoveryUrlRaw = body?.abandoned_checkout_url;
-    const recoveryUrl = isValidRecoveryUrl(recoveryUrlRaw) ? String(recoveryUrlRaw).trim() : null;
-    const dedupeKey = String(
-      body?.id ||
-      body?.token ||
-      body?.checkout_token ||
-      body?.abandoned_checkout_url ||
-      `${phone || 'no-phone'}:${body?.updated_at || body?.created_at || Date.now()}`
-    );
-
-    persistRecoveryLog({
-      dedupeKey,
-      level: 'info',
-      stage: 'webhook_received',
-      message: 'Webhook de carrito abandonado recibido',
-      payload: {
-        phone,
-        firstName,
-        recoveryUrlRaw,
-        totalPrice: body?.total_price ?? null
-      }
-    });
-
-    console.log('==============================');
-    console.log('🛒 Webhook de carrito abandonado recibido:');
-    console.log(`👤 Cliente: ${firstName}`);
-    console.log(`📱 Teléfono detectado: ${phone}`);
-    console.log(`🔗 Recovery URL recibida: ${recoveryUrlRaw || 'N/A'}`);
-    if (!recoveryUrl) {
-      console.log('⚠️ Recovery URL inválida o de prueba. Se enviará mensaje sin link.');
+    if (!body?.checkout) {
+      return res.status(400).json({ error: 'No checkout data' });
     }
-    console.log(`🧩 Dedupe key: ${dedupeKey}`);
-    console.log('==============================');
 
-    const totalPrice = parseTotalPrice(body?.total_price);
+    const checkoutId = body.checkout.id;
+    const customerFirstName = body.checkout.customer?.first_name || 'Cliente';
+    const checkoutCreatedAt = body.checkout.created_at ? new Date(body.checkout.created_at).getTime() : Date.now();
+    const totalPrice = parseFloat(body.checkout.total_price ?? '0');
+    const phone = body.checkout.phone || body.checkout.billing_address?.phone || '';
+    const statusWhenReceived = body.checkout.abandoned_checkout_url ? 'abandoned' : 'created';
+    const now = Date.now();
 
-    if (phone && totalPrice !== null && totalPrice > 0) {
-      if (markAndCheckDuplicate(dedupeKey)) {
-        setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado');
-        persistRecoveryState({
-          dedupeKey,
-          status: 'duplicate',
-          attempts: 0,
-          phone,
-          customerName: firstName,
-          checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
-          lastError: 'Webhook duplicado'
-        });
-        persistRecoveryLog({
-          dedupeKey,
-          level: 'warn',
-          stage: 'dedupe_duplicate',
-          message: 'Webhook duplicado ignorado'
-        });
-        structuredLog('WARN', 'dedupe_duplicate', 'Webhook duplicado dentro de ventana', {
-          dedupeKey,
-          phone,
-          firstName
-        });
-        console.log('♻️ Webhook duplicado detectado dentro de la ventana. No se reenvía WhatsApp.');
-        return res.status(200).send('Webhook duplicado ignorado');
-      }
+    const dedupeKey = `${checkoutId}:${statusWhenReceived}`;
+    const timeSinceCreation = now - checkoutCreatedAt;
 
-      if (await wasRecentlyPersisted(dedupeKey)) {
-        setMessageTracking(dedupeKey, 'duplicate', 0, 'Webhook duplicado por persistencia');
-        persistRecoveryState({
-          dedupeKey,
-          status: 'duplicate',
-          attempts: 0,
-          phone,
-          customerName: firstName,
-          checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
-          lastError: 'Webhook duplicado por persistencia'
-        });
-        persistRecoveryLog({
-          dedupeKey,
-          level: 'warn',
-          stage: 'dedupe_duplicate_persisted',
-          message: 'Webhook duplicado detectado por registro persistido'
-        });
-        structuredLog('WARN', 'dedupe_duplicate_persisted', 'Webhook duplicado en base de datos', {
-          dedupeKey,
-          phone,
-          firstName
-        });
-        console.log('♻️ Webhook duplicado detectado por persistencia. No se reenvía WhatsApp.');
-        return res.status(200).send('Webhook duplicado persistente ignorado');
-      }
-
-      const numeroLimpio = normalizePhone(phone);
-
-      if (!isValidPhoneForWhatsApp(numeroLimpio)) {
-        setMessageTracking(dedupeKey, 'skipped', 0, 'Numero invalido');
-        persistRecoveryState({
-          dedupeKey,
-          status: 'skipped',
-          attempts: 0,
-          phone: numeroLimpio,
-          customerName: firstName,
-          checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
-          lastError: 'Numero invalido'
-        });
-        persistRecoveryLog({
-          dedupeKey,
-          level: 'warn',
-          stage: 'phone_invalid',
-          message: 'Numero invalido para WhatsApp; se omite envio',
-          payload: { numeroLimpio }
-        });
-        structuredLog('WARN', 'phone_invalid', 'Número inválido para WhatsApp', {
-          dedupeKey,
-          numeroLimpio,
-          firstName
-        });
-        console.log(`⚠️ Número inválido para WhatsApp. Se omite envío: ${numeroLimpio}`);
-        return res.status(200).send('Webhook procesado (numero invalido)');
-      }
-
-      // Usa la URL dinámica de Shopify si es válida; si no, cae al permalink de lujo.
-      const checkoutUrl = recoveryUrl ?? CHECKOUT_URL_LUXURY;
-      console.log(`🛒 URL de checkout a enviar: ${checkoutUrl}`);
-
-      const mensaje = MESSAGE_TEMPLATE(firstName, checkoutUrl);
-
-      setMessageTracking(dedupeKey, 'queued', 0);
-      persistRecoveryState({
-        dedupeKey,
-        status: 'queued',
-        attempts: 0,
-        phone: numeroLimpio,
-        customerName: firstName,
-        checkoutUrl
+    if (RECOVERY_STATUS_TRACKING.has(dedupeKey)) {
+      return res.json({
+        status: 'duplicate',
+        checkoutId
       });
-      persistRecoveryLog({
-        dedupeKey,
-        level: 'info',
-        stage: 'message_queued',
-        message: 'Mensaje encolado para envio',
-        payload: { numeroLimpio, checkoutUrl }
-      });
-      structuredLog('INFO', 'message_queued', 'Mensaje de recuperación encolado', {
-        dedupeKey,
-        phone: numeroLimpio,
-        firstName,
-        checkoutUrl,
-        queueLength: WA_TASK_QUEUE.length
-      });
-      scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje);
-      console.log(`[QUEUE] 📨 Mensaje encolado para ${dedupeKey}. Cola actual: ${WA_TASK_QUEUE.length}`);
+    }
 
-      return res.status(200).send('Webhook aceptado para envio');
-    } else {
-      setMessageTracking(dedupeKey, 'skipped', 0, 'Sin numero o carrito de prueba');
-      persistRecoveryState({
-        dedupeKey,
+    const numeroLimpio = normalizePhoneNumber(phone);
+
+    if (!isValidPhoneForWhatsApp(numeroLimpio)) {
+      MESSAGE_TRACKER.set(dedupeKey, {
         status: 'skipped',
         attempts: 0,
-        phone,
-        customerName: firstName,
-        checkoutUrl: recoveryUrl ?? CHECKOUT_URL_LUXURY,
-        lastError: 'Sin numero o carrito de prueba'
+        updatedAt: Date.now()
       });
-      persistRecoveryLog({
-        dedupeKey,
-        level: 'warn',
-        stage: 'message_skipped',
-        message: 'No se envio WhatsApp por falta de numero o total 0',
-        payload: {
-          hasPhone: Boolean(phone),
-          totalPrice: body?.total_price ?? null,
-          parsedTotalPrice: totalPrice
-        }
+
+      return res.json({
+        status: 'skipped',
+        reason: 'invalid_phone'
       });
-      structuredLog('WARN', 'message_skipped', 'Webhook omitido por validación', {
-        dedupeKey,
-        firstName,
-        hasPhone: Boolean(phone),
-        totalPrice,
-        reason: !phone ? 'no_phone' : totalPrice === null ? 'invalid_price' : 'zero_price'
-      });
-      console.log('⚠️ No se envió WhatsApp (Falta número o es un carrito de prueba de $0).');
     }
 
-    return res.status(200).send('Webhook procesado');
+    if (timeSinceCreation < ABANDONED_CHECKOUT_TIMEOUT_S * 1000) {
+      const waitMs = ABANDONED_CHECKOUT_TIMEOUT_S * 1000 - timeSinceCreation;
+
+      setTimeout(() => {
+        RECOVERY_STATUS_TRACKING.set(dedupeKey, Date.now());
+        const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, CHECKOUT_URL_LUXURY);
+        scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensajeRecuperacion);
+      }, waitMs);
+
+      return res.json({
+        status: 'queued',
+        message: `Será enviado en ${Math.round(waitMs / 1000)}s`
+      });
+    }
+
+    RECOVERY_STATUS_TRACKING.set(dedupeKey, Date.now());
+    const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, CHECKOUT_URL_LUXURY);
+    scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensajeRecuperacion);
+
+    await recordRecoveryEvent({
+      dedupeKey,
+      status: 'queued'
+    });
+
+    res.json({
+      status: 'queued',
+      checkoutId,
+      dedupeKey
+    });
   } catch (error) {
-    console.error('[Oráculo] Error procesando webhook:', error);
-    return res.status(500).send('Error interno');
+    console.error('[Webhook] Error:', error);
+
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+
+// Endpoint temporal para listar rutas activas
+app.get('/routes', (req, res) => {
+  const routes: any[] = [];
+  app._router.stack.forEach((middleware: any) => {
+    if (middleware.route) {
+      // routes registered directly on the app
+      routes.push({
+        method: Object.keys(middleware.route.methods)[0].toUpperCase(),
+        path: middleware.route.path
+      });
+    } else if (middleware.name === 'router') {
+      // router middleware 
+      middleware.handle.stack.forEach((handler: any) => {
+        if (handler.route) {
+          routes.push({
+            method: Object.keys(handler.route.methods)[0].toUpperCase(),
+            path: handler.route.path
+          });
+        }
+      });
+    }
+  });
+  res.json(routes);
+});
+
+// ─── INNOV-01: Endpoint de alertas financieras desde Google Apps Script ───────
+// Recibe alertas del Libro Mayor y las reenvía por WhatsApp al dueño.
+// Autenticado con el header x-finance-alert-token.
+const FINANCE_ALERT_TOKEN = process.env.FINANCE_ALERT_TOKEN ?? '';
+const FINANCE_ALERT_PHONE = process.env.FINANCE_ALERT_PHONE ?? '';
+
+const ALERT_DEDUP_WINDOW_MS = 55 * 60 * 1000; // 55 min — alineado con silence window de Apps Script
+const alertDedupMap = new Map<string, number>();
+
+app.post('/finance-alert', async (req: Request, res: Response) => {
+  const token = req.get('x-finance-alert-token');
+
+  if (!FINANCE_ALERT_TOKEN || token !== FINANCE_ALERT_TOKEN) {
+    structuredLog('WARN', 'finance_alert', 'Token inválido o ausente en /finance-alert');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { phone, alertType, message } = req.body as {
+    phone?: string;
+    alertType?: string;
+    message?: string;
+    sentAt?: string;
+  };
+
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: 'Campo message requerido' });
+  }
+
+  const targetPhone = phone || FINANCE_ALERT_PHONE;
+  if (!targetPhone) {
+    return res.status(400).json({ error: 'No hay teléfono destino configurado' });
+  }
+
+  // Deduplicación en memoria: misma alerta no se reenvía dentro de la ventana
+  const dedupKey = `${alertType ?? 'MANUAL'}::${targetPhone}`;
+  const lastSent = alertDedupMap.get(dedupKey);
+  if (lastSent && Date.now() - lastSent < ALERT_DEDUP_WINDOW_MS) {
+    structuredLog('INFO', 'finance_alert', 'Alerta deduplicada (ya enviada recientemente)', {
+      alertType,
+      dedupKey,
+      minutesAgo: Math.round((Date.now() - lastSent) / 60000)
+    });
+    return res.json({ status: 'deduplicated', alertType });
+  }
+
+  try {
+    await enviarMensajeWhatsApp(targetPhone, message);
+    alertDedupMap.set(dedupKey, Date.now());
+
+    structuredLog('INFO', 'finance_alert', 'Alerta financiera enviada por WhatsApp', {
+      alertType,
+      phone: targetPhone,
+      messageLength: message.length
+    });
+
+    res.json({ status: 'sent', alertType });
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    structuredLog('ERROR', 'finance_alert', 'Error enviando alerta financiera', {
+      alertType,
+      phone: targetPhone,
+      error: errorMsg
+    });
+    res.status(500).json({ error: 'Error enviando mensaje WhatsApp', detail: errorMsg });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 El Oráculo de VITTOSTORE está escuchando en el puerto ${PORT}`);
+  console.log(`\n✅ Server running on port ${PORT}`);
+  console.log(`📊 Health: http://localhost:${PORT}/health`);
+  console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
+  console.log(`🔔 Finance alerts: http://localhost:${PORT}/finance-alert\n`);
 });
