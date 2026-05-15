@@ -236,7 +236,8 @@ var ReviewQueueService = (function () {
 
       var queueRow = buildQueueRow(rejectedKey, row);
       queueSheet.appendRow(queueRow);
-      refreshOperationalFields(queueSheet, queueSheet.getLastRow(), queueRow);
+      // MEJORA-14: buildQueueRow already computes PRIORIDAD/RESPONSABLE/FECHA_VENCIMIENTO/SEMAFORO
+      // — refreshOperationalFields here was redundant (4 extra API calls per new row)
       existingKeys[rejectedKey] = true;
       if (gmailId) existingKeys['__gmail__' + gmailId] = true;
       inserted += 1;
