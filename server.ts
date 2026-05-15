@@ -447,6 +447,15 @@ const FINANCE_ALERT_PHONE = process.env.FINANCE_ALERT_PHONE ?? '';
 const ALERT_DEDUP_WINDOW_MS = 55 * 60 * 1000; // 55 min — alineado con silence window de Apps Script
 const alertDedupMap = new Map<string, number>();
 
+app.get('/finance-alert/ping', (_req, res) => {
+  res.json({
+    endpoint: 'finance-alert',
+    tokenConfigured: !!FINANCE_ALERT_TOKEN,
+    phoneConfigured: !!FINANCE_ALERT_PHONE,
+    deployedAt: '14dff77'
+  });
+});
+
 app.post('/finance-alert', async (req: Request, res: Response) => {
   const token = req.get('x-finance-alert-token');
 
