@@ -214,3 +214,30 @@ var GeminiService = (function () {
     getCircuitStatus: getCircuitStatus
   };
 })();
+
+// Wrapper global — aparece en el desplegable de Apps Script
+function checkGeminiCircuitStatus() {
+  var s = GeminiService.getCircuitStatus();
+  var icon = s.circuitOpen ? '🔴 ABIERTO' : '🟢 CERRADO';
+  var lines = [
+    'Circuit breaker Gemini: ' + icon,
+    '',
+    'Estado       : ' + s.state,
+    'Fallos consec: ' + s.failCount + ' / ' + s.failThreshold,
+    'Abierto en   : ' + (s.openedAt ? new Date(parseInt(s.openedAt, 10)).toISOString() : '—'),
+    'Ventana      : ' + s.openWindowMin + ' min',
+  ];
+  var msg = lines.join('\n');
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+function resetGeminiCircuit() {
+  PropertiesService.getScriptProperties().setProperties({
+    'GEMINI_CB_STATE':      'CLOSED',
+    'GEMINI_CB_FAIL_COUNT': '0'
+  });
+  PropertiesService.getScriptProperties().deleteProperty('GEMINI_CB_OPENED_AT');
+  SpreadsheetApp.getUi().alert('✅ Circuit breaker Gemini reseteado a CLOSED.');
+  Logger.log('GeminiService circuit breaker reseteado manualmente.');
+}
