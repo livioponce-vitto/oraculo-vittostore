@@ -19,6 +19,84 @@ function setContingencyDedupWindow() {
   SpreadsheetApp.getUi().alert(msg);
 }
 
+// ─── MEJORA-4: Deduplicación de filas en TipoCambio_USD ──────────────────────
+
+/**
+ * Elimina filas duplicadas en TipoCambio_USD causadas por el bug de upsert
+ * (getValues() devolvía Date objects que no coincidían con el key string).
+ * Por cada fecha, conserva la fila con ActualizadoEn más reciente.
+ * Reescribe la hoja limpia y ordenada por fecha ascendente.
+ */
+function deduplicateFxRates() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName(FinanceConfig.SHEETS.FX_RATES);
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('❌ Hoja "' + FinanceConfig.SHEETS.FX_RATES + '" no encontrada.');
+    return;
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('ℹ️ TipoCambio_USD no tiene datos para deduplicar.');
+    return;
+  }
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  var totalBefore = data.length;
+
+  // Construir mapa fecha → fila ganadora (la de ActualizadoEn más reciente)
+  var best = {};
+  data.forEach(function (row) {
+    var fecha = row[0];
+    var key = (fecha instanceof Date)
+      ? Utilities.formatDate(fecha, 'America/Santiago', 'yyyy-MM-dd')
+      : String(fecha || '').trim();
+
+    if (!key) return;
+
+    var updatedAt = row[3] ? new Date(row[3]).getTime() : 0;
+    if (!best[key] || updatedAt > best[key].updatedAt) {
+      best[key] = {
+        row: [key, row[1], row[2], row[3]],
+        updatedAt: updatedAt
+      };
+    }
+  });
+
+  // Ordenar por fecha ascendente
+  var cleanRows = Object.keys(best).sort().map(function (k) {
+    return best[k].row;
+  });
+
+  var totalAfter = cleanRows.length;
+  var removed = totalBefore - totalAfter;
+
+  // Reescribir: limpiar bloque de datos y volcar filas limpias
+  sheet.getRange(2, 1, lastRow - 1, 4).clearContent();
+  if (cleanRows.length > 0) {
+    sheet.getRange(2, 1, cleanRows.length, 4).setValues(cleanRows);
+  }
+
+  SpreadsheetApp.flush();
+
+  var msg = [
+    '✅ deduplicateFxRates completado',
+    '',
+    'Filas antes : ' + totalBefore,
+    'Filas después: ' + totalAfter,
+    'Duplicados eliminados: ' + removed,
+    '',
+    'La hoja queda ordenada por fecha ascendente.'
+  ].join('\n');
+
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+
+  AuditService.logInfo('LedgerFixes.deduplicateFxRates',
+    'Duplicados eliminados: ' + removed + ' | Filas finales: ' + totalAfter);
+}
+
 // ─── MEJORA-1: Corrección de filas GWS mal ingresadas ────────────────────────
 // Rows 11-12 de Libro_Mayor tienen el esquema de columnas incorrecto porque
 // el proceso BOT_MANUAL los ingresó con un mapeo desalineado.
