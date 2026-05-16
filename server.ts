@@ -1,6 +1,6 @@
 
 
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import crypto from 'crypto';
@@ -17,6 +17,8 @@ import {
 } from './recovery-store';
 import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
 import { persistQueueItem, removeQueueItem, loadPersistedQueue } from './queue-store';
+import { addToDLQ, getDLQStats, getDLQItems, removeFromDLQ, clearDLQ } from './dlq-store';
+import { startWeeklyReport } from './weekly-report';
 
 dotenv.config();
 
@@ -74,6 +76,9 @@ const WHATSAPP_IS_CLOUD_API = WHATSAPP_API_ENDPOINT.startsWith('https://');
 const WA_RETRY_BASE_DELAY_MS = Number(process.env.WA_RETRY_BASE_DELAY_MS ?? 5000);
 const QUEUE_ALERT_THRESHOLD = Number(process.env.QUEUE_ALERT_THRESHOLD ?? 20);
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET ?? '';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? '';
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? '';
+const DLQ_ALERT_THRESHOLD = 10;
 
 const MESSAGE_TEMPLATE = (customerFirstName: string, checkoutUrl: string): string =>
   `¡Hola ${customerFirstName}! 👋
@@ -193,11 +198,37 @@ const enqueueWhatsAppTask = (task: () => Promise<void>) => {
   }
 };
 
+const sendSlackNotification = async (text: string): Promise<void> => {
+  if (!SLACK_WEBHOOK_URL) return;
+  try {
+    await fetch(SLACK_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+  } catch (err) {
+    structuredLog('WARN', 'slack_notify', 'Error enviando notificación Slack', {
+      error: err instanceof Error ? err.message : String(err)
+    });
+  }
+};
+
+const requireAdmin = (req: Request, res: Response, next: NextFunction): void => {
+  const auth = req.get('authorization') ?? '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  next();
+};
+
 const scheduleWhatsAppSend = (
   dedupeKey: string,
   numeroLimpio: string,
   mensaje: string,
-  attempt = 1
+  attempt = 1,
+  firstEnqueuedAt = Date.now()
 ) => {
   persistQueueItem({
     id: dedupeKey,
@@ -259,10 +290,24 @@ const scheduleWhatsAppSend = (
       if (attempt < WA_MAX_ATTEMPTS) {
         const delayMs = WA_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
         setTimeout(() => {
-          scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje, attempt + 1);
+          scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje, attempt + 1, firstEnqueuedAt);
         }, delayMs);
       } else {
+        addToDLQ({
+          id: dedupeKey,
+          phone: numeroLimpio,
+          message: mensaje,
+          attempts: attempt,
+          enqueuedAt: firstEnqueuedAt,
+          lastError: errorMsg
+        });
         removeQueueItem(dedupeKey);
+        const dlqStats = getDLQStats();
+        if (dlqStats.count > DLQ_ALERT_THRESHOLD) {
+          void sendSlackNotification(
+            `🚨 *VittoStore DLQ Alert*: ${dlqStats.count} mensajes en dead-letter queue superan el umbral de ${DLQ_ALERT_THRESHOLD}. Revisar en /admin/dlq`
+          );
+        }
       }
     }
   });
@@ -524,6 +569,37 @@ app.post('/finance-alert', strictLimiter, async (req: Request, res: Response) =>
   }
 });
 
+// ─── ADMIN ROUTES — DLQ ──────────────────────────────────────────────────────
+app.get('/admin/dlq', requireAdmin, (_req, res) => {
+  res.json(getDLQStats());
+});
+
+app.post('/admin/dlq/:id/retry', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  const items = getDLQItems();
+  const item = items.find(i => i.id === id);
+  if (!item) {
+    return res.status(404).json({ error: 'Item no encontrado en DLQ' });
+  }
+  removeFromDLQ(id);
+  scheduleWhatsAppSend(item.id, item.phone, item.message, 1, Date.now());
+  structuredLog('INFO', 'dlq_retry', 'Item re-encolado desde DLQ', { id });
+  res.json({ status: 'requeued', id });
+});
+
+app.delete('/admin/dlq/:id', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  removeFromDLQ(id);
+  structuredLog('INFO', 'dlq_delete', 'Item eliminado de DLQ', { id });
+  res.json({ status: 'deleted', id });
+});
+
+app.delete('/admin/dlq', requireAdmin, (_req, res) => {
+  clearDLQ();
+  structuredLog('INFO', 'dlq_clear', 'DLQ limpiada completamente');
+  res.json({ status: 'cleared' });
+});
+
 app.listen(PORT, () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/health`);
@@ -536,5 +612,10 @@ app.listen(PORT, () => {
     for (const item of persisted) {
       scheduleWhatsAppSend(item.id, item.phone, item.message, item.attempt);
     }
+  }
+
+  if (process.env.SLACK_WEBHOOK_URL) {
+    startWeeklyReport(process.env.SLACK_WEBHOOK_URL);
+    console.log('[WeeklyReport] Scheduled: Mondays 09:00');
   }
 });
