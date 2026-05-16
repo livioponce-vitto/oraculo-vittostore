@@ -6,3 +6,6 @@ pending_messages.json
 .wwebjs_cache/
 Ayuda con Configuración de Cuenta - Google Gemini.html
 Ayuda con Configuración de Cuenta - Google Gemini_files/
+
+# Persistent queue state
+/data/

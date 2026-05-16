@@ -16,6 +16,7 @@ import {
   recordRecoveryEvent
 } from './recovery-store';
 import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
+import { persistQueueItem, removeQueueItem, loadPersistedQueue } from './queue-store';
 
 dotenv.config();
 
@@ -198,9 +199,17 @@ const scheduleWhatsAppSend = (
   mensaje: string,
   attempt = 1
 ) => {
+  persistQueueItem({
+    id: dedupeKey,
+    phone: numeroLimpio,
+    message: mensaje,
+    attempt,
+    enqueuedAt: Date.now()
+  });
   enqueueWhatsAppTask(async () => {
     try {
       await enviarMensajeWhatsAppModo(numeroLimpio, mensaje, true);
+      removeQueueItem(dedupeKey);
 
       let tracking = MESSAGE_TRACKER.get(dedupeKey);
       if (!tracking) {
@@ -252,6 +261,8 @@ const scheduleWhatsAppSend = (
         setTimeout(() => {
           scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensaje, attempt + 1);
         }, delayMs);
+      } else {
+        removeQueueItem(dedupeKey);
       }
     }
   });
@@ -518,4 +529,12 @@ app.listen(PORT, () => {
   console.log(`📊 Health: http://localhost:${PORT}/health`);
   console.log(`🔗 Webhook: http://localhost:${PORT}/webhook`);
   console.log(`🔔 Finance alerts: http://localhost:${PORT}/finance-alert\n`);
+
+  const persisted = loadPersistedQueue();
+  if (persisted.length > 0) {
+    console.log(`[QueueStore] Reanudando ${persisted.length} mensajes pendientes desde disco`);
+    for (const item of persisted) {
+      scheduleWhatsAppSend(item.id, item.phone, item.message, item.attempt);
+    }
+  }
 });
