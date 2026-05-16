@@ -1,0 +1,45 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Tests & dev
+tests
+coverage
+.nyc_output
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Git & IDE
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+*.swp
+
+# Docs
+docs
+*.md
+!README.md
+
+# Build artifacts
+dist
+build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Local session data
+config/sessions
+.wwebjs_auth
+data
