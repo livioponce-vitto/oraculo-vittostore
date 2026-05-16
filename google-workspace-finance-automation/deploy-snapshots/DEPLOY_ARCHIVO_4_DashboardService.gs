@@ -44,16 +44,15 @@ var DashboardService = (function () {
     var currentPeriod = Utilities.formatDate(today, 'America/Santiago', 'yyyy-MM');
 
     rows.forEach(function (row) {
-      var period = '';
-      try {
-        period = Utilities.formatDate(new Date(row[0]), 'America/Santiago', 'yyyy-MM');
-      } catch (error) {
-        period = '';
+      if (String(row[29] || '') !== 'CONCILIADO_BANCO') {
+        pendingBank += 1;
       }
 
-      // pendingBank solo cuenta el mes actual para evitar acumulacion historica.
-      if (period === currentPeriod && String(row[29] || '') !== 'CONCILIADO_BANCO') {
-        pendingBank += 1;
+      var period = '';
+      try {
+        period = Utilities.formatDate(new Date(row[1]), 'America/Santiago', 'yyyy-MM');
+      } catch (error) {
+        period = '';
       }
 
       if (period !== currentPeriod) {
@@ -158,60 +157,6 @@ var DashboardService = (function () {
     };
   }
 
-  function getHeuristicNoiseHealth() {
-    var sheet = getSheet(FinanceConfig.SHEETS.REJECTED_RECORDS, FinanceConfig.HEADERS.REJECTED_RECORDS);
-    var lastRow = sheet.getLastRow();
-
-    if (lastRow < 2) {
-      return {
-        totalRejectedHeuristic: 0,
-        rejectedDocSuspicious: 0,
-        rejectedAmountImplausible: 0,
-        topNoisySenders: []
-      };
-    }
-
-    var rows = sheet.getRange(2, 1, lastRow - 1, FinanceConfig.HEADERS.REJECTED_RECORDS.length).getValues();
-    var totalRejectedHeuristic = 0;
-    var rejectedDocSuspicious = 0;
-    var rejectedAmountImplausible = 0;
-    var senderCounts = {};
-
-    rows.forEach(function (row) {
-      var fuente = String(row[1] || '').toUpperCase();
-      var motivo = String(row[6] || '').toUpperCase();
-      var emailOrigen = String(row[3] || '').trim().toLowerCase();
-
-      if (fuente !== 'HEURISTICA_LOCAL' && motivo.indexOf('HEURISTICA') === -1) {
-        return;
-      }
-
-      totalRejectedHeuristic += 1;
-
-      if (motivo.indexOf('HEURISTICA_DOC_SOSPECHOSO') !== -1) {
-        rejectedDocSuspicious += 1;
-      }
-      if (motivo.indexOf('HEURISTICA_MONTO_NO_PLAUSIBLE') !== -1) {
-        rejectedAmountImplausible += 1;
-      }
-      if (emailOrigen) {
-        senderCounts[emailOrigen] = (senderCounts[emailOrigen] || 0) + 1;
-      }
-    });
-
-    var topNoisySenders = Object.keys(senderCounts)
-      .map(function (sender) { return { sender: sender, count: senderCounts[sender] }; })
-      .sort(function (a, b) { return b.count - a.count; })
-      .slice(0, 5);
-
-    return {
-      totalRejectedHeuristic: totalRejectedHeuristic,
-      rejectedDocSuspicious: rejectedDocSuspicious,
-      rejectedAmountImplausible: rejectedAmountImplausible,
-      topNoisySenders: topNoisySenders
-    };
-  }
-
   function getSystemHealthSnapshot() {
     return {
       updatedAt: FinanceUtils.nowIso(),
@@ -220,8 +165,7 @@ var DashboardService = (function () {
       ledger: getLedgerHealth(),
       quality: getDataQualityHealth(),
       queue: getReviewQueueHealth(),
-      contingency: getContingencyHealth(),
-      heuristicNoise: getHeuristicNoiseHealth()
+      contingency: getContingencyHealth()
     };
   }
 
@@ -240,12 +184,7 @@ var DashboardService = (function () {
       ['Operacion', 'PendientesBanco', snapshot.ledger.pendingBank, 'Filas no conciliadas'],
       ['Operacion', 'IngresosMes', snapshot.ledger.ingresosMes, 'Acumulado mensual'],
       ['Operacion', 'EgresosMes', snapshot.ledger.egresosMes, 'Acumulado mensual'],
-      ['Operacion', 'ResultadoMes', snapshot.ledger.resultadoMes, 'Ingresos - Egresos del mes'],
-      ['AntiRuido', 'HeuristicaRechazadaTotal', snapshot.heuristicNoise ? snapshot.heuristicNoise.totalRejectedHeuristic : 0, 'Emails bloqueados por filtro heuristico antes de guardar'],
-      ['AntiRuido', 'HeuristicaDocSospechoso', snapshot.heuristicNoise ? snapshot.heuristicNoise.rejectedDocSuspicious : 0, 'Rechazados por NumeroDocumento sospechoso'],
-      ['AntiRuido', 'HeuristicaMontoNoPlausibl', snapshot.heuristicNoise ? snapshot.heuristicNoise.rejectedAmountImplausible : 0, 'Rechazados por monto fuera de rango permitido'],
-      ['AntiRuido', 'TopRuidoso1', (snapshot.heuristicNoise && snapshot.heuristicNoise.topNoisySenders.length > 0) ? snapshot.heuristicNoise.topNoisySenders[0].sender + ' (' + snapshot.heuristicNoise.topNoisySenders[0].count + ')' : '-', 'Remitente con mas rechazos heuristicos'],
-      ['AntiRuido', 'TopRuidoso2', (snapshot.heuristicNoise && snapshot.heuristicNoise.topNoisySenders.length > 1) ? snapshot.heuristicNoise.topNoisySenders[1].sender + ' (' + snapshot.heuristicNoise.topNoisySenders[1].count + ')' : '-', 'Segundo remitente mas ruidoso']
+      ['Operacion', 'ResultadoMes', snapshot.ledger.resultadoMes, 'Ingresos - Egresos del mes']
     ];
   }
 
@@ -286,48 +225,6 @@ var DashboardService = (function () {
     ];
   }
 
-  // Vista_Contador: mapeo fila por fila del Libro Mayor al formato contable
-  function refreshAccountantView() {
-    var today     = FinanceUtils.getChileDate();
-    var yearStart = new Date(today.getFullYear(), 0, 1);
-    var rows      = LedgerService.getRowsForPeriod(yearStart, today);
-
-    var mapped = rows.map(function (row) {
-      return [
-        row[0],                          // Fecha (FechaRegistro)
-        row[1],                          // FechaDocumento
-        row[2],                          // Movimiento
-        row[3],                          // Categoria
-        row[4],                          // Subcategoria
-        row[5],                          // ProveedorCliente
-        row[6],                          // RUT
-        row[7],                          // NumDocumento
-        row[25] || row[8] || '',         // MonedaOrigen
-        row[26] || row[11] || 0,         // MontoOriginal
-        row[27] || 1,                    // TipoCambio
-        FinanceUtils.normalizeCurrency(row[9]),   // MontoNeto_CLP
-        FinanceUtils.normalizeCurrency(row[10]),  // IVA_CLP
-        FinanceUtils.normalizeCurrency(row[28] || row[11]), // Total_CLP
-        row[12] || '',                   // EstadoPago
-        row[13] || '',                   // MedioPago
-        row[14] || '',                   // OrigenVenta
-        row[19] || '',                   // Observaciones
-        row[29] || 'PENDIENTE_BANCO'     // Conciliacion
-      ];
-    });
-
-    // Orden cronológico descendente — lo más reciente primero
-    mapped.sort(function (a, b) {
-      var da = a[0] instanceof Date ? a[0].getTime() : new Date(a[0]).getTime();
-      var db = b[0] instanceof Date ? b[0].getTime() : new Date(b[0]).getTime();
-      return db - da;
-    });
-
-    writeRowsToView(FinanceConfig.SHEETS.ACCOUNTANT_VIEW, FinanceConfig.HEADERS.ACCOUNTANT_VIEW, mapped);
-    AuditService.logInfo('Vista_Contador actualizada', 'Filas: ' + mapped.length + ' | Año: ' + today.getFullYear());
-    return { rows: mapped.length };
-  }
-
   function refreshExecutiveSuite() {
     LedgerService.ensureCoreSheets();
     var snapshot = getSystemHealthSnapshot();
@@ -336,13 +233,7 @@ var DashboardService = (function () {
     writeRowsToView(FinanceConfig.SHEETS.FINANCE_VIEW, FinanceConfig.HEADERS.FINANCE_VIEW, buildFinanceViewRows(snapshot));
     writeRowsToView(FinanceConfig.SHEETS.COMMERCIAL_VIEW, FinanceConfig.HEADERS.COMMERCIAL_VIEW, buildCommercialViewRows(snapshot));
     writeRowsToView(FinanceConfig.SHEETS.MANAGEMENT_VIEW, FinanceConfig.HEADERS.MANAGEMENT_VIEW, buildManagementViewRows(snapshot));
-    refreshAccountantView();
     SheetPresentationService.applyAllPresentation();
-
-    // INNOV-01: evaluar alertas WhatsApp después de actualizar el snapshot
-    if (typeof WhatsAppAlertsService !== 'undefined') {
-      WhatsAppAlertsService.evaluateAndAlert(snapshot);
-    }
 
     AuditService.logInfo('Dashboard ejecutivo actualizado', JSON.stringify(snapshot));
     return snapshot;
@@ -372,8 +263,6 @@ var DashboardService = (function () {
   return {
     getMonthlyCloseBlockers: getMonthlyCloseBlockers,
     getSystemHealthSnapshot: getSystemHealthSnapshot,
-    refreshExecutiveSuite: refreshExecutiveSuite,
-    refreshAccountantView: refreshAccountantView,
-    getHeuristicNoiseHealth: getHeuristicNoiseHealth
+    refreshExecutiveSuite: refreshExecutiveSuite
   };
 })();

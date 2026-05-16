@@ -297,3 +297,73 @@ function fixGWSRows() {
 
   AuditService.logInfo('LedgerFixes.fixGWSRows', 'Filas 11-12 corregidas con schema LEDGER correcto');
 }
+
+// ─── Purga selectiva de logs INFO en Auditoria_Finanzas ──────────────────────
+/**
+ * Elimina filas INFO más antiguas que INFO_RETENTION_DAYS (default 7).
+ * WARN y ERROR nunca se tocan, independientemente de su antigüedad.
+ * Seguro de re-ejecutar: opera sobre una copia en memoria y reescribe de una vez.
+ */
+function purgeOldInfoLogs() {
+  var INFO_RETENTION_DAYS = 7;
+  var WARN_RETENTION_DAYS = 30;
+  // ERROR: siempre conservado
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName(FinanceConfig.SHEETS.AUDIT);
+
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('❌ Hoja "' + FinanceConfig.SHEETS.AUDIT + '" no encontrada.');
+    return;
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('ℹ️ Auditoria sin datos.');
+    return;
+  }
+
+  var now = Date.now();
+  var infoCutoff  = new Date(now - INFO_RETENTION_DAYS  * 24 * 60 * 60 * 1000);
+  var warnCutoff  = new Date(now - WARN_RETENTION_DAYS  * 24 * 60 * 60 * 1000);
+
+  var data = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  var totalBefore = data.length;
+
+  var kept = data.filter(function (row) {
+    var severity = String(row[1] || '').toUpperCase();
+    var ts = new Date(row[0]);
+    var validTs = !isNaN(ts.getTime());
+
+    if (severity === 'ERROR') return true;
+    if (severity === 'WARN')  return validTs && ts >= warnCutoff;
+    return validTs && ts >= infoCutoff;
+  });
+
+  var removed = totalBefore - kept.length;
+
+  sheet.getRange(2, 1, lastRow - 1, 4).clearContent();
+  if (kept.length > 0) {
+    sheet.getRange(2, 1, kept.length, 4).setValues(kept);
+  }
+  SpreadsheetApp.flush();
+
+  var msg = [
+    '✅ purgeOldInfoLogs completado',
+    '',
+    'Filas antes  : ' + totalBefore,
+    'Filas después: ' + kept.length,
+    'Eliminados   : ' + removed,
+    '',
+    'Política aplicada:',
+    '  ERROR → conservado siempre',
+    '  WARN  → últimos ' + WARN_RETENTION_DAYS + ' días',
+    '  INFO  → últimos ' + INFO_RETENTION_DAYS  + ' días'
+  ].join('\n');
+
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+
+  AuditService.logInfo('LedgerFixes.purgeOldInfoLogs',
+    'Eliminados: ' + removed + ' | Filas finales: ' + kept.length);
+}

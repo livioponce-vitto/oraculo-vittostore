@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      :root {
+        --bg: #f8fafc;
+        --card: #ffffff;
+        --ink: #0f172a;
+        --muted: #475569;
+        --primary: #0f766e;
+        --primary-strong: #115e59;
+        --accent: #1d4ed8;
+        --warn: #b45309;
+        --danger: #b91c1c;
+        --border: #cbd5e1;
+      }
+      body {
+        margin: 0;
+        font-family: Verdana, sans-serif;
+        color: var(--ink);
+        background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 50%);
+      }
+      .wrap {
+        padding: 12px;
+      }
+      .title {
+        font-size: 14px;
+        font-weight: 700;
+        margin: 0 0 8px;
+      }
+      .subtitle {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 8px;
+        font-size: 11px;
+        color: #ffffff;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      button.primary { background: var(--primary); }
+      button.primary:hover { background: var(--primary-strong); }
+      button.warn { background: var(--warn); }
+      button.danger { background: var(--danger); }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .status {
+        font-size: 11px;
+        line-height: 1.4;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #f8fafc;
+        padding: 8px;
+        white-space: pre-wrap;
+      }
+      .small {
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <p class="title">Centro de Mandos - Botones 1-Clic</p>
+      <p class="subtitle">Ejecuta rutinas estrategicas sin abrir el selector de funciones.</p>
+
+      <div class="card">
+        <h3>Rutinas estrategicas</h3>
+        <div class="grid">
+          <button class="primary" onclick="runAction('MORNING_OPS')">Apertura operativa</button>
+          <button class="warn" onclick="runAction('CLOSE_OPS')">Cierre operativo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Operacion diaria</h3>
+        <div class="grid">
+          <button onclick="runAction('RUN_INGESTION')">Ingestion ahora</button>
+          <button onclick="runAction('RUN_FX')">Actualizar TC USD</button>
+          <button onclick="runAction('RUN_DATA_QUALITY')">Control de calidad</button>
+          <button onclick="runAction('SYNC_REVIEW_QUEUE')">Sync rechazados</button>
+          <button onclick="runAction('RUN_BANK_RECON')">Conciliacion banco</button>
+          <button onclick="runAction('REFRESH_DASHBOARD')">Actualizar dashboard</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Cuadro de mandos</h3>
+        <div class="grid">
+          <button onclick="runAction('APPLY_PRESENTATION')">Aplicar formatos</button>
+          <button onclick="runAction('REFRESH_COMMAND_CENTER')">Actualizar Centro</button>
+        </div>
+      </div>
+
+      <div id="status" class="status">Estado: listo para ejecutar.</div>
+      <p class="small">Consejo: usa "Apertura operativa" al iniciar jornada y "Cierre operativo" al terminar.</p>
+    </div>
+
+    <script>
+      function setLoading(loading) {
+        var buttons = document.querySelectorAll('button');
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].disabled = loading;
+        }
+      }
+
+      function setStatus(text) {
+        document.getElementById('status').textContent = text;
+      }
+
+      function runAction(action) {
+        setLoading(true);
+        setStatus('Ejecutando accion: ' + action + ' ...');
+
+        google.script.run
+          .withSuccessHandler(function (result) {
+            setLoading(false);
+            setStatus(
+              'OK\n' +
+              'Accion: ' + result.action + '\n' +
+              'Inicio: ' + result.startedAt + '\n' +
+              'Fin: ' + result.executedAt
+            );
+          })
+          .withFailureHandler(function (error) {
+            setLoading(false);
+            setStatus('ERROR\n' + (error && error.message ? error.message : String(error)));
+          })
+          .runCommandCenterAction(action);
+      }
+    </script>
+  </body>
+</html>

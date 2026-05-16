@@ -266,6 +266,40 @@ var SheetPresentationService = (function () {
     }
   }
 
+  function applyAccountantViewFormatting() {
+    var headers = FinanceConfig.HEADERS.ACCOUNTANT_VIEW;
+    var sheet   = getSheet(FinanceConfig.SHEETS.ACCOUNTANT_VIEW, headers);
+
+    applyHeaderStyle(sheet, headers, BRAND.NAVY, BRAND.WHITE);
+    autoResizeWithLimits(sheet, headers.length);
+    sheet.setTabColor('#059669');
+    applyDataStyle(sheet, headers);
+    applyBanding(sheet, headers);
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    var dataRows = lastRow - 1;
+
+    // MontoOriginal (col 10): puede ser USD/CLP, hasta 2 decimales
+    sheet.getRange(2, 10, dataRows, 1).setNumberFormat('$#,##0.##').setHorizontalAlignment('right');
+    // MontoNeto_CLP (col 12), IVA_CLP (col 13), Total_CLP (col 14): enteros con $
+    sheet.getRange(2, 12, dataRows, 3).setNumberFormat('$#,##0').setHorizontalAlignment('right');
+    // TipoCambio (col 11): ratio con 4 decimales
+    sheet.getRange(2, 11, dataRows, 1).setNumberFormat('#,##0.0000').setHorizontalAlignment('right');
+
+    clearConditionalRules(sheet);
+    var maxRows         = Math.max(sheet.getMaxRows() - 1, 1);
+    var movimientoRange = sheet.getRange(2, 3,  maxRows, 1);
+    var conciliadoRange = sheet.getRange(2, 19, maxRows, 1);
+    var rules = [
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('INGRESO').setBackground('#dcfce7').setFontColor('#166534').setRanges([movimientoRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('EGRESO').setBackground('#fee2e2').setFontColor('#991b1b').setRanges([movimientoRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('CONCILIADO_BANCO').setBackground('#dcfce7').setRanges([conciliadoRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('PENDIENTE_BANCO').setBackground('#fef3c7').setRanges([conciliadoRange]).build()
+    ];
+    sheet.setConditionalFormatRules(rules);
+  }
+
   function applyAllPresentation() {
     LedgerService.ensureCoreSheets();
     applyDashboardFormatting();
@@ -273,10 +307,11 @@ var SheetPresentationService = (function () {
     applyLedgerFormatting();
     applyFxRatesFormatting();
     applyAuditFormatting();
+    applyAccountantViewFormatting();
     applyControlSheetFormatting(FinanceConfig.SHEETS.DATA_QUALITY,             FinanceConfig.HEADERS.DATA_QUALITY,             '#7c2d12', 4);
     applyControlSheetFormatting(FinanceConfig.SHEETS.REJECTED_RECORDS,         FinanceConfig.HEADERS.REJECTED_RECORDS,         '#991b1b', 6);
     applyControlSheetFormatting(FinanceConfig.SHEETS.INTEGRATION_CONTINGENCY,  FinanceConfig.HEADERS.INTEGRATION_CONTINGENCY,  '#1f2937', 4);
-    AuditService.logInfo('Formato visual aplicado', 'Montserrat + banding + Libro_Mayor + Auditoria');
+    AuditService.logInfo('Formato visual aplicado', 'Montserrat + banding + Libro_Mayor + Auditoria + Vista_Contador');
     return { status: 'ok' };
   }
 

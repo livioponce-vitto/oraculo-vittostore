@@ -293,6 +293,12 @@ var ComplianceScheduler = (function () {
       AuditService.logWarn('Balance mensual sin envio de correo', monthlyEmail.error);
     }
 
+    // INNOV-01: alerta mensual OK por WhatsApp al completar el balance
+    if (typeof WhatsAppAlertsService !== 'undefined') {
+      var snap = { ledger: { ingresosMes: ingresos, egresosMes: egresos, resultadoMes: resultado } };
+      WhatsAppAlertsService.alertCierreOk(snap);
+    }
+
     AuditService.logInfo('Balance mensual generado', period + ' resultado=' + resultado);
     return { period: period, ingresos: ingresos, egresos: egresos, resultado: resultado, status: status };
   }
@@ -324,9 +330,53 @@ var ComplianceScheduler = (function () {
     }
   }
 
+  // INNOV-01: trigger separado para el reporte diario al contador
+  // Ejecutar una sola vez desde el dropdown de Apps Script para activarlo.
+  // Usa Script Property REPORTE_CONTADOR_HORA (hora CLT, ej: 20 = 20:00). Default: 20.
+  function setupAccountantReportTrigger() {
+    try {
+      var props = PropertiesService.getScriptProperties();
+      var hour  = parseInt(props.getProperty('REPORTE_CONTADOR_HORA') || '20', 10);
+      if (isNaN(hour) || hour < 0 || hour > 23) hour = 20;
+
+      var triggers = ScriptApp.getProjectTriggers();
+      triggers.forEach(function (trigger) {
+        if (trigger.getHandlerFunction() === 'runDailySalesReportToAccountant') {
+          ScriptApp.deleteTrigger(trigger);
+        }
+      });
+
+      ScriptApp.newTrigger('runDailySalesReportToAccountant')
+        .timeBased()
+        .everyDays(1)
+        .atHour(hour)
+        .nearMinute(0)
+        .inTimezone('America/Santiago')
+        .create();
+
+      AuditService.logInfo('Trigger reporte contador configurado', 'Diario ' + hour + ':00 CLT');
+      return { success: true, hour: hour };
+    } catch (error) {
+      AuditService.logError('Error configurando trigger reporte contador', String(error));
+      return { success: false, error: String(error) };
+    }
+  }
+
   return {
     runDailyComplianceAlerts: runDailyComplianceAlerts,
     runMonthlyReconciliation: runMonthlyReconciliation,
-    setupComplianceTriggers: setupComplianceTriggers
+    setupComplianceTriggers: setupComplianceTriggers,
+    setupAccountantReportTrigger: setupAccountantReportTrigger
   };
 })();
+
+// Wrapper global — configura el trigger del reporte diario al contador
+// Ajusta REPORTE_CONTADOR_HORA en Script Properties (ej: 20 = 20:00 CLT) antes de ejecutar.
+function runSetupAccountantReportTrigger() {
+  var result = ComplianceScheduler.setupAccountantReportTrigger();
+  SpreadsheetApp.getUi().alert(
+    result.success
+      ? '✅ Trigger configurado: reporte al contador diario a las ' + result.hour + ':00 CLT'
+      : '❌ Error: ' + result.error
+  );
+}

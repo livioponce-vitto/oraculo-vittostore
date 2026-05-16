@@ -9,3 +9,9 @@ Ayuda con Configuración de Cuenta - Google Gemini_files/
 
 # Persistent queue state
 /data/
+
+# auto-added cleanup
+node_modules/
+dist/
+.env.local
+*.tsbuildinfo

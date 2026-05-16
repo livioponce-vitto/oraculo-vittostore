@@ -998,14 +998,18 @@ var GmailIngestion = (function () {
           message.markRead();
           thread.addLabel(getOrCreateProcessedLabel(documentType));
         } catch (error) {
-          safeRegisterIncident_('GMAIL_INGESTION', documentType, String(error), {
+          var errorStr = String(error);
+          if (typeof WhatsAppAlertsService !== 'undefined' && /503|gemini|quota/i.test(errorStr)) {
+            WhatsAppAlertsService.alertGeminiDown(errorStr.substring(0, 200));
+          }
+          safeRegisterIncident_('GMAIL_INGESTION', documentType, errorStr, {
             gmailMessageId: messageId,
             responsible: 'Finanzas',
             fallbackApplied: false
           });
           safeAuditLog_('ERROR', 'Fallo procesamiento Gmail/Gemini', JSON.stringify({
             messageId: messageId,
-            error: String(error)
+            error: errorStr
           }));
         }
       });
@@ -1515,14 +1519,18 @@ function processMessagesByQueryStandalone_(searchQuery, documentType, allowedPro
         message.markRead();
         thread.addLabel(getOrCreateProcessedLabelStandalone_(documentType));
       } catch (error) {
-        safeRegisterIncident_('GMAIL_INGESTION', documentType, String(error), {
+        var errorStrSA = String(error);
+        if (typeof WhatsAppAlertsService !== 'undefined' && /503|gemini|quota/i.test(errorStrSA)) {
+          WhatsAppAlertsService.alertGeminiDown(errorStrSA.substring(0, 200));
+        }
+        safeRegisterIncident_('GMAIL_INGESTION', documentType, errorStrSA, {
           gmailMessageId: messageId,
           responsible: 'Finanzas',
           fallbackApplied: false
         });
         safeAuditLog_('ERROR', 'Fallo procesamiento Gmail/Gemini', JSON.stringify({
           messageId: messageId,
-          error: String(error)
+          error: errorStrSA
         }));
       }
     });
