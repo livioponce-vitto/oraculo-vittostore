@@ -53,9 +53,25 @@ const sendMessageNow = async (numero: string, mensaje: string) => {
         })
     });
 
+    const responseBody = await response.text();
+
     if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`WhatsApp Cloud API error ${response.status}: ${body}`);
+        let errorData: any;
+        try { errorData = JSON.parse(responseBody); } catch { errorData = { raw: responseBody }; }
+        const errorCode    = errorData?.error?.code    ?? response.status;
+        const errorMessage = errorData?.error?.message ?? responseBody;
+        const errorType    = errorData?.error?.type    ?? 'UNKNOWN';
+
+        console.error('[WhatsApp] Meta Cloud API Error:', JSON.stringify({
+            status: response.status, errorCode, errorMessage, errorType,
+            endpoint: WHATSAPP_API_ENDPOINT, to: numeroNormalizado,
+            timestamp: new Date().toISOString()
+        }));
+
+        if (response.status === 401) throw new Error(`[401 Unauthorized] Token expirado o inválido. ${errorMessage}`);
+        if (response.status === 403) throw new Error(`[403 Forbidden] Cuenta restringida o permisos insuficientes. ${errorMessage}`);
+        if (response.status === 400) throw new Error(`[400 Bad Request] Número, template o JSON inválido. ${errorMessage}`);
+        throw new Error(`[${errorCode}] WhatsApp Cloud API Error: ${errorMessage}`);
     }
 
     isWhatsappReady = true;

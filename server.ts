@@ -4,6 +4,9 @@ import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import crypto from 'crypto';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { z } from 'zod';
 import {
   appendRecoveryLog,
   findRecoveryEventByDedupeKey,
@@ -132,6 +135,26 @@ const hasValidShopifyHmac = (req: RequestWithRawBody) => {
 
 const isValidPhoneForWhatsApp = (phone: string) => /^\d{11,15}$/.test(phone);
 
+// ─── SCHEMAS ZOD ──────────────────────────────────────────────────────────────
+const webhookSchema = z.object({
+  checkout: z.object({
+    id: z.union([z.string(), z.number()]),
+    customer: z.object({ first_name: z.string().optional() }).optional(),
+    created_at: z.string().optional(),
+    total_price: z.union([z.string(), z.number()]).optional(),
+    phone: z.string().optional(),
+    billing_address: z.object({ phone: z.string().optional() }).optional(),
+    abandoned_checkout_url: z.string().optional(),
+  }),
+});
+
+const financeAlertSchema = z.object({
+  phone: z.string().optional(),
+  alertType: z.string().max(64).optional(),
+  message: z.string().min(1).max(4096),
+  sentAt: z.string().optional(),
+});
+
 const normalizePhoneNumber = (raw: string) => {
   const cleaned = String(raw || '')
     .replace(/\+/g, '')
@@ -256,51 +279,49 @@ const processWhatsAppQueue = async () => {
   isQueueAlertActive = false;
 };
 
-app.use(cors());
+// --- Seguridad HTTP ---
+app.use(helmet());
+
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? 'https://vittostore.store,https://admin.shopify.com').split(',').map(s => s.trim());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin) || /\.myshopify\.com$/.test(origin) || /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS bloqueado: ' + origin));
+  },
+  credentials: true,
+}));
+
+// Rate limit general: 100 req / 15 min
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas peticiones, intenta mas tarde.' },
+}));
+
+// Rate limit estricto para endpoints sensibles
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos. Espera 15 minutos.' },
+});
+
 app.use(
   express.json({
+    limit: '256kb',
     verify: (req: any, _res, buf) => {
       req.rawBody = buf;
     }
   })
 );
 
-// Endpoint de prueba: POST /test-meta (registrado después de los middlewares)
-app.post('/test-meta', async (req, res) => {
-  const { numero, mensaje } = req.body;
-  if (!numero || !mensaje) {
-    return res.status(400).json({ error: 'Faltan parametros: numero y mensaje' });
-  }
-  try {
-    await enviarMensajeWhatsApp(numero, mensaje);
-    res.json({ ok: true, numero, mensaje });
-  } catch (error) {
-    res.status(500).json({ error: error?.toString?.() || 'Error enviando mensaje' });
-  }
-});
-
-// Endpoint temporal para listar rutas activas
-app.get('/routes', (req, res) => {
-  const routes: any[] = [];
-  app._router.stack.forEach((middleware: any) => {
-    if (middleware.route) {
-      routes.push({
-        method: Object.keys(middleware.route.methods)[0].toUpperCase(),
-        path: middleware.route.path
-      });
-    } else if (middleware.name === 'router') {
-      middleware.handle.stack.forEach((handler: any) => {
-        if (handler.route) {
-          routes.push({
-            method: Object.keys(handler.route.methods)[0].toUpperCase(),
-            path: handler.route.path
-          });
-        }
-      });
-    }
-  });
-  res.json(routes);
-});
+// [SEGURIDAD] /test-meta y /routes eliminados — exponian endpoints internos.
 
 app.get('/health', async (_req, res) => {
   const recoveryHealth = await getRecoveryStoreHealth();
@@ -329,21 +350,22 @@ app.get('/health', async (_req, res) => {
   });
 });
 
-app.post('/webhook', async (req: RequestWithRawBody, res) => {
+app.post('/webhook', strictLimiter, async (req: RequestWithRawBody, res) => {
   try {
     if (!hasValidShopifyHmac(req)) {
       return res.status(401).json({ error: 'Invalid HMAC' });
     }
 
-    const body = req.body;
-    if (!body?.checkout) {
-      return res.status(400).json({ error: 'No checkout data' });
+    const parsed = webhookSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Payload invalido', issues: parsed.error.issues });
     }
+    const body = parsed.data;
 
     const checkoutId = body.checkout.id;
     const customerFirstName = body.checkout.customer?.first_name || 'Cliente';
     const checkoutCreatedAt = body.checkout.created_at ? new Date(body.checkout.created_at).getTime() : Date.now();
-    const totalPrice = parseFloat(body.checkout.total_price ?? '0');
+    const totalPrice = parseFloat(String(body.checkout.total_price ?? '0'));
     const phone = body.checkout.phone || body.checkout.billing_address?.phone || '';
     const statusWhenReceived = body.checkout.abandoned_checkout_url ? 'abandoned' : 'created';
     const now = Date.now();
@@ -413,30 +435,7 @@ app.post('/webhook', async (req: RequestWithRawBody, res) => {
 });
 
 
-// Endpoint temporal para listar rutas activas
-app.get('/routes', (req, res) => {
-  const routes: any[] = [];
-  app._router.stack.forEach((middleware: any) => {
-    if (middleware.route) {
-      // routes registered directly on the app
-      routes.push({
-        method: Object.keys(middleware.route.methods)[0].toUpperCase(),
-        path: middleware.route.path
-      });
-    } else if (middleware.name === 'router') {
-      // router middleware 
-      middleware.handle.stack.forEach((handler: any) => {
-        if (handler.route) {
-          routes.push({
-            method: Object.keys(handler.route.methods)[0].toUpperCase(),
-            path: handler.route.path
-          });
-        }
-      });
-    }
-  });
-  res.json(routes);
-});
+// [SEGURIDAD] /routes duplicado eliminado.
 
 // ─── INNOV-01: Endpoint de alertas financieras desde Google Apps Script ───────
 // Recibe alertas del Libro Mayor y las reenvía por WhatsApp al dueño.
@@ -456,7 +455,7 @@ app.get('/finance-alert/ping', (_req, res) => {
   });
 });
 
-app.post('/finance-alert', async (req: Request, res: Response) => {
+app.post('/finance-alert', strictLimiter, async (req: Request, res: Response) => {
   const token = req.get('x-finance-alert-token');
 
   if (!FINANCE_ALERT_TOKEN || token !== FINANCE_ALERT_TOKEN) {
