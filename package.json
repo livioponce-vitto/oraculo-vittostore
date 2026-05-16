@@ -10,9 +10,13 @@
     "prisma:migrate:dev": "prisma migrate dev",
     "postinstall": "prisma generate && prisma migrate deploy",
     "prisma:migrate:resolve:baileys": "prisma migrate resolve --applied 20250507000000_add_baileys_auth_kv",
+    "prisma:seed": "tsx prisma/seed.ts",
     "build": "tsc",
     "start:prod": "node dist/server.js",
     "typecheck": "tsc --noEmit"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "keywords": [],
   "author": "",
