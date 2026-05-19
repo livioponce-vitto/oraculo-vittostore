@@ -199,17 +199,29 @@ const enqueueWhatsAppTask = (task: () => Promise<void>) => {
 };
 
 const sendSlackNotification = async (text: string): Promise<void> => {
-  if (!SLACK_WEBHOOK_URL) return;
-  try {
-    await fetch(SLACK_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    });
-  } catch (err) {
-    structuredLog('WARN', 'slack_notify', 'Error enviando notificación Slack', {
-      error: err instanceof Error ? err.message : String(err)
-    });
+  if (SLACK_WEBHOOK_URL) {
+    try {
+      await fetch(SLACK_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      return;
+    } catch (err) {
+      structuredLog('WARN', 'slack_notify', 'Error enviando notificación Slack', {
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  if (FINANCE_ALERT_PHONE) {
+    try {
+      await enviarMensajeWhatsApp(FINANCE_ALERT_PHONE, text);
+    } catch (err) {
+      structuredLog('WARN', 'dlq_alert', 'Error enviando alerta DLQ por WhatsApp', {
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
   }
 };
 
@@ -634,10 +646,8 @@ app.listen(PORT, () => {
     }
   }
 
-  if (process.env.SLACK_WEBHOOK_URL) {
-    startWeeklyReport(process.env.SLACK_WEBHOOK_URL);
-    console.log('[WeeklyReport] Scheduled: Mondays 09:00');
-  }
+  startWeeklyReport(SLACK_WEBHOOK_URL, FINANCE_ALERT_PHONE);
+  console.log('[WeeklyReport] Scheduled: Mondays 09:00');
 
   validateWhatsAppToken().then(result => {
     if (result.ok) {

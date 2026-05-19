@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import { loadPersistedQueue } from './queue-store';
 import { getDLQStats } from './dlq-store';
+import { enviarMensajeWhatsApp } from './whatsapp';
 
 const prisma = process.env.DATABASE_URL ? new PrismaClient() : null;
 
@@ -95,11 +96,33 @@ const buildSlackPayload = (
   };
 };
 
+const buildWhatsAppReport = (
+  stats: StatusBreakdown,
+  queueLength: number,
+  dlqCount: number,
+  dateLabel: string
+): string => {
+  const recoveryRate =
+    stats.sent + stats.failed + stats.queued > 0
+      ? ((stats.sent / (stats.sent + stats.failed + stats.queued)) * 100).toFixed(1)
+      : '0.0';
+
+  return `📊 *Reporte Semanal VittoStore*
+Semana del ${dateLabel}
+
+✅ Enviados: ${stats.sent}
+❌ Fallidos: ${stats.failed}
+🔁 En cola: ${queueLength}
+⛔ DLQ: ${dlqCount}
+📈 Tasa de éxito: ${recoveryRate}%
+📦 Total eventos: ${stats.total}`;
+};
+
 /**
- * Schedules a Monday 09:00 cron that sends a weekly Slack Block Kit report.
+ * Schedules a Monday 09:00 cron. Sends to Slack if available, WhatsApp otherwise.
  * Only active when NODE_ENV !== 'test'.
  */
-export const startWeeklyReport = (slackWebhookUrl: string): void => {
+export const startWeeklyReport = (slackWebhookUrl: string, whatsappPhone?: string): void => {
   if (process.env.NODE_ENV === 'test') return;
 
   cron.schedule('0 9 * * 1', async () => {
@@ -114,18 +137,25 @@ export const startWeeklyReport = (slackWebhookUrl: string): void => {
         year: 'numeric'
       });
 
-      const payload = buildSlackPayload(stats, queueLength, dlqCount, dateLabel);
+      if (slackWebhookUrl) {
+        const payload = buildSlackPayload(stats, queueLength, dlqCount, dateLabel);
+        const response = await fetch(slackWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          console.error(`[WeeklyReport] Slack respondió ${response.status}: ${await response.text()}`);
+        } else {
+          console.log('[WeeklyReport] Reporte semanal enviado a Slack');
+          return;
+        }
+      }
 
-      const response = await fetch(slackWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        console.error(`[WeeklyReport] Slack respondió ${response.status}: ${await response.text()}`);
-      } else {
-        console.log('[WeeklyReport] Reporte semanal enviado a Slack exitosamente');
+      if (whatsappPhone) {
+        const message = buildWhatsAppReport(stats, queueLength, dlqCount, dateLabel);
+        await enviarMensajeWhatsApp(whatsappPhone, message);
+        console.log('[WeeklyReport] Reporte semanal enviado por WhatsApp');
       }
     } catch (err) {
       console.error('[WeeklyReport] Error enviando reporte semanal:', err);
