@@ -107,7 +107,6 @@ const WA_MAX_CONCURRENCY = 3;
 let activeWorkers = 0;
 let isQueueAlertActive = false;
 
-// const app = express(); // Eliminada duplicada
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const WEBHOOK_DEDUPE_WINDOW_MS = ABANDONED_CHECKOUT_TIMEOUT_S * 1000;
 

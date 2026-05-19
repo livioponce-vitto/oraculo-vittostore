@@ -8,19 +8,12 @@ const isWhatsAppCloudApi = WHATSAPP_API_ENDPOINT.startsWith('https://');
 
 // --- Estado WhatsApp Cloud API ---
 let isWhatsappReady = false;
-const pendingMessages: Array<{ numero: string; mensaje: string; createdAt: number }> = [];
-const MAX_PENDING_MESSAGES = 100;
 
 // --- Funciones principales ---
 
 const normalizePhoneForWhatsApp = (raw: string) => {
-    // Shopify puede enviar +569..., espacios o guiones.
     const cleaned = String(raw || '').replace(/\+/g, '').replace(/\D/g, '');
     return cleaned;
-};
-
-const persistPendingMessages = async () => {
-    // Opcional: implementar persistencia si se requiere
 };
 
 const sendMessageNow = async (numero: string, mensaje: string) => {
@@ -96,8 +89,6 @@ export const enviarMensajeWhatsAppModo = async (
 export const getWhatsAppHealth = () => {
     return {
         ready: isWhatsappReady,
-        pendingMessages: pendingMessages.length,
-        maxPending: MAX_PENDING_MESSAGES,
         mode: 'Meta Cloud API',
         endpoint: WHATSAPP_API_ENDPOINT ? 'set' : 'unset'
     };
