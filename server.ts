@@ -558,16 +558,11 @@ app.post('/finance-alert', strictLimiter, async (req: Request, res: Response) =>
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { phone, alertType, message } = req.body as {
-    phone?: string;
-    alertType?: string;
-    message?: string;
-    sentAt?: string;
-  };
-
-  if (!message || typeof message !== 'string') {
-    return res.status(400).json({ error: 'Campo message requerido' });
+  const parsed = financeAlertSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Payload inválido', issues: parsed.error.issues });
   }
+  const { phone, alertType, message } = parsed.data;
 
   const targetPhone = phone || FINANCE_ALERT_PHONE;
   if (!targetPhone) {
