@@ -80,3 +80,24 @@ export const getDLQStats = () => {
     items
   };
 };
+
+const DLQ_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Elimina items cuyo failedAt supera maxAgeMs. Devuelve cuántos se eliminaron. */
+export const purgeStaleDLQItems = (maxAgeMs = DLQ_MAX_AGE_MS): number => {
+  const cutoff = Date.now() - maxAgeMs;
+  const before = readAll();
+  const after = before.filter(i => i.failedAt >= cutoff);
+  const removed = before.length - after.length;
+  if (removed > 0) {
+    writeAll(after);
+    console.log(`[DLQStore] Purged ${removed} stale item(s) older than ${maxAgeMs / 86400000}d`);
+  }
+  return removed;
+};
+
+/** Arranca un intervalo diario que elimina items viejos de la DLQ. */
+export const startDLQAutoCleanup = (): void => {
+  purgeStaleDLQItems();
+  setInterval(() => purgeStaleDLQItems(), 24 * 60 * 60 * 1000);
+};
