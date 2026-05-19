@@ -600,6 +600,23 @@ app.delete('/admin/dlq', requireAdmin, (_req, res) => {
   res.json({ status: 'cleared' });
 });
 
+// Limpia entradas del dedup Map con más de 48h para evitar crecimiento indefinido
+setInterval(() => {
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+  let removed = 0;
+  for (const [key, ts] of RECOVERY_STATUS_TRACKING) {
+    if (ts < cutoff) {
+      RECOVERY_STATUS_TRACKING.delete(key);
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    structuredLog('INFO', 'dedup_cleanup', `Dedup Map: ${removed} entradas expiradas eliminadas`, {
+      remaining: RECOVERY_STATUS_TRACKING.size
+    });
+  }
+}, 6 * 60 * 60 * 1000);
+
 app.listen(PORT, () => {
   console.log(`\n✅ Server running on port ${PORT}`);
   console.log(`📊 Health: http://localhost:${PORT}/health`);
@@ -610,6 +627,8 @@ app.listen(PORT, () => {
   if (persisted.length > 0) {
     console.log(`[QueueStore] Reanudando ${persisted.length} mensajes pendientes desde disco`);
     for (const item of persisted) {
+      // Restaurar dedup Map para evitar re-envíos si llega un webhook del mismo checkout
+      RECOVERY_STATUS_TRACKING.set(item.id, item.enqueuedAt);
       scheduleWhatsAppSend(item.id, item.phone, item.message, item.attempt);
     }
   }
