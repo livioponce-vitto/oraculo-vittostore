@@ -103,7 +103,8 @@ const RECOVERY_STATUS_TRACKING = new Map<string, number>();
 const MESSAGE_TRACKER = new Map<string, RecoveryTracking>();
 const WA_TASK_QUEUE: Array<() => Promise<void>> = [];
 const WA_MAX_ATTEMPTS = 3;
-let isQueueWorkerRunning = false;
+const WA_MAX_CONCURRENCY = 3;
+let activeWorkers = 0;
 let isQueueAlertActive = false;
 
 // const app = express(); // Eliminada duplicada
@@ -193,9 +194,7 @@ const enqueueWhatsAppTask = (task: () => Promise<void>) => {
     }
   }
 
-  if (!isQueueWorkerRunning) {
-    void processWhatsAppQueue();
-  }
+  processWhatsAppQueue();
 };
 
 const sendSlackNotification = async (text: string): Promise<void> => {
@@ -325,26 +324,22 @@ const scheduleWhatsAppSend = (
   });
 };
 
-const processWhatsAppQueue = async () => {
-  if (isQueueWorkerRunning) {
-    return;
+const processWhatsAppQueue = () => {
+  while (WA_TASK_QUEUE.length > 0 && activeWorkers < WA_MAX_CONCURRENCY) {
+    const task = WA_TASK_QUEUE.shift()!;
+    activeWorkers++;
+
+    task()
+      .catch(error => console.error('[Queue] Error:', error))
+      .finally(() => {
+        activeWorkers--;
+        if (WA_TASK_QUEUE.length > 0) {
+          processWhatsAppQueue();
+        } else if (activeWorkers === 0) {
+          isQueueAlertActive = false;
+        }
+      });
   }
-
-  isQueueWorkerRunning = true;
-
-  while (WA_TASK_QUEUE.length > 0) {
-    const task = WA_TASK_QUEUE.shift();
-    if (task) {
-      try {
-        await task();
-      } catch (error) {
-        console.error('[Queue] Error:', error);
-      }
-    }
-  }
-
-  isQueueWorkerRunning = false;
-  isQueueAlertActive = false;
 };
 
 // --- Seguridad HTTP ---
