@@ -391,30 +391,56 @@ app.use(
 
 // [SEGURIDAD] /test-meta y /routes eliminados — exponian endpoints internos.
 
+const getTrackingStats = () => {
+  const stats = { sent: 0, failed: 0, duplicate: 0, skipped: 0, queued: 0 };
+  for (const { status } of MESSAGE_TRACKER.values()) {
+    if (status in stats) stats[status as keyof typeof stats]++;
+  }
+  return stats;
+};
+
 app.get('/health', async (_req, res) => {
   const recoveryHealth = await getRecoveryStoreHealth();
   const wa = getWhatsAppHealth();
+  const tracking = getTrackingStats();
 
-  const alerts: string[] = [];
+  const alertMessages: string[] = [];
 
   if ((recoveryHealth as any).databaseConnected === false) {
-    alerts.push('DATABASE_DISCONNECTED');
+    alertMessages.push('DATABASE_DISCONNECTED');
   }
-
   if (!wa.ready) {
-    alerts.push('WHATSAPP_DISCONNECTED');
+    alertMessages.push('WHATSAPP_DISCONNECTED');
+  }
+  if (WA_TASK_QUEUE.length > QUEUE_ALERT_THRESHOLD) {
+    alertMessages.push(`QUEUE_OVERLOAD: ${WA_TASK_QUEUE.length}`);
   }
 
-  if (WA_TASK_QUEUE.length > QUEUE_ALERT_THRESHOLD) {
-    alerts.push(`QUEUE_OVERLOAD: ${WA_TASK_QUEUE.length}`);
-  }
+  const hasAlerts = alertMessages.length > 0;
 
   res.json({
+    ok: !hasAlerts,
+    healthy: !hasAlerts,
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    alerts,
-    whatsapp: wa,
-    queueLength: WA_TASK_QUEUE.length
+    uptimeSeconds: Math.floor(process.uptime()),
+    alerts: {
+      hasAlerts,
+      count: alertMessages.length,
+      messages: alertMessages
+    },
+    whatsapp: {
+      ready: wa.ready,
+      mode: wa.mode,
+      endpoint: wa.endpoint,
+      reconnectAttempts: 0,
+      lastDisconnectCode: null,
+      reconnectScheduledInSeconds: 0
+    },
+    queue: {
+      totalPending: WA_TASK_QUEUE.length,
+      alertThreshold: QUEUE_ALERT_THRESHOLD
+    },
+    tracking
   });
 });
 
