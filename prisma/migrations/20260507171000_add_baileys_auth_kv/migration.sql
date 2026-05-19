@@ -1,5 +1,5 @@
 -- CreateTable
-CREATE TABLE "BaileysAuthKV" (
+CREATE TABLE IF NOT EXISTS "BaileysAuthKV" (
     "key" TEXT NOT NULL,
     "data" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

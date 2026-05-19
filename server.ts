@@ -15,7 +15,7 @@ import {
   PersistedRecoveryStatus,
   recordRecoveryEvent
 } from './recovery-store';
-import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth } from './whatsapp';
+import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth, validateWhatsAppToken } from './whatsapp';
 import { persistQueueItem, removeQueueItem, loadPersistedQueue } from './queue-store';
 import { addToDLQ, getDLQStats, getDLQItems, removeFromDLQ, clearDLQ } from './dlq-store';
 import { startWeeklyReport } from './weekly-report';
@@ -575,7 +575,7 @@ app.get('/admin/dlq', requireAdmin, (_req, res) => {
 });
 
 app.post('/admin/dlq/:id/retry', requireAdmin, (req, res) => {
-  const { id } = req.params;
+  const { id } = req.params as { id: string };
   const items = getDLQItems();
   const item = items.find(i => i.id === id);
   if (!item) {
@@ -588,7 +588,7 @@ app.post('/admin/dlq/:id/retry', requireAdmin, (req, res) => {
 });
 
 app.delete('/admin/dlq/:id', requireAdmin, (req, res) => {
-  const { id } = req.params;
+  const { id } = req.params as { id: string };
   removeFromDLQ(id);
   structuredLog('INFO', 'dlq_delete', 'Item eliminado de DLQ', { id });
   res.json({ status: 'deleted', id });
@@ -618,4 +618,12 @@ app.listen(PORT, () => {
     startWeeklyReport(process.env.SLACK_WEBHOOK_URL);
     console.log('[WeeklyReport] Scheduled: Mondays 09:00');
   }
+
+  validateWhatsAppToken().then(result => {
+    if (result.ok) {
+      structuredLog('INFO', 'startup', 'WhatsApp token válido — listo para enviar mensajes');
+    } else {
+      structuredLog('WARN', 'startup', `WhatsApp no disponible al arrancar: ${result.error}`);
+    }
+  });
 });

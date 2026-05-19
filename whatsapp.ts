@@ -102,3 +102,35 @@ export const getWhatsAppHealth = () => {
         endpoint: WHATSAPP_API_ENDPOINT ? 'set' : 'unset'
     };
 };
+
+// Valida el token contra la API de Meta sin enviar ningún mensaje.
+// Marca isWhatsappReady = true si el token es válido.
+export const validateWhatsAppToken = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (!isWhatsAppCloudApi || !WHATSAPP_API_TOKEN) {
+        return { ok: false, error: 'WhatsApp no configurado' };
+    }
+
+    const phoneNumberUrl = WHATSAPP_API_ENDPOINT.replace(/\/messages$/, '');
+
+    try {
+        const response = await fetch(phoneNumberUrl, {
+            headers: { Authorization: `Bearer ${WHATSAPP_API_TOKEN}` }
+        });
+
+        if (response.ok) {
+            isWhatsappReady = true;
+            return { ok: true };
+        }
+
+        let errorData: any;
+        try { errorData = JSON.parse(await response.text()); } catch { errorData = {}; }
+        const msg = errorData?.error?.message ?? `HTTP ${response.status}`;
+
+        if (response.status === 401 || response.status === 403) {
+            return { ok: false, error: `Token inválido o expirado: ${msg}` };
+        }
+        return { ok: false, error: msg };
+    } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+};
