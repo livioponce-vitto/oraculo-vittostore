@@ -17,7 +17,7 @@ import {
 } from './recovery-store';
 import { enviarMensajeWhatsApp, enviarMensajeWhatsAppModo, getWhatsAppHealth, validateWhatsAppToken } from './whatsapp';
 import { persistQueueItem, removeQueueItem, loadPersistedQueue } from './queue-store';
-import { addToDLQ, getDLQStats, getDLQItems, removeFromDLQ, clearDLQ } from './dlq-store';
+import { addToDLQ, getDLQStats, getDLQItems, removeFromDLQ, clearDLQ, startDLQAutoCleanup } from './dlq-store';
 import { startWeeklyReport } from './weekly-report';
 
 dotenv.config();
@@ -663,6 +663,9 @@ app.listen(PORT, () => {
 
   startWeeklyReport(SLACK_WEBHOOK_URL, FINANCE_ALERT_PHONE);
   console.log('[WeeklyReport] Scheduled: Mondays 09:00');
+
+  startDLQAutoCleanup();
+  console.log('[DLQStore] Auto-cleanup scheduled: daily, items older than 7d');
 
   validateWhatsAppToken().then(result => {
     if (result.ok) {
