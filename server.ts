@@ -423,6 +423,7 @@ app.post('/webhook', strictLimiter, async (req: RequestWithRawBody, res) => {
     const checkoutCreatedAt = body.checkout.created_at ? new Date(body.checkout.created_at).getTime() : Date.now();
     const totalPrice = parseFloat(String(body.checkout.total_price ?? '0'));
     const phone = body.checkout.phone || body.checkout.billing_address?.phone || '';
+    const checkoutUrl = body.checkout.abandoned_checkout_url ?? CHECKOUT_URL_LUXURY;
     const statusWhenReceived = body.checkout.abandoned_checkout_url ? 'abandoned' : 'created';
     const now = Date.now();
 
@@ -456,7 +457,7 @@ app.post('/webhook', strictLimiter, async (req: RequestWithRawBody, res) => {
 
       setTimeout(() => {
         RECOVERY_STATUS_TRACKING.set(dedupeKey, Date.now());
-        const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, CHECKOUT_URL_LUXURY);
+        const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, checkoutUrl);
         scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensajeRecuperacion);
       }, waitMs);
 
@@ -467,7 +468,7 @@ app.post('/webhook', strictLimiter, async (req: RequestWithRawBody, res) => {
     }
 
     RECOVERY_STATUS_TRACKING.set(dedupeKey, Date.now());
-    const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, CHECKOUT_URL_LUXURY);
+    const mensajeRecuperacion = MESSAGE_TEMPLATE(customerFirstName, checkoutUrl);
     scheduleWhatsAppSend(dedupeKey, numeroLimpio, mensajeRecuperacion);
 
     await recordRecoveryEvent({
