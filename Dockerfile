@@ -2,7 +2,7 @@
 # Multi-stage build para Oraculo Backend (TypeScript)
 
 # ── Stage 1: build (compila TS → JS) ──────────────────────
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* tsconfig.json ./
 RUN npm ci
@@ -10,7 +10,7 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 # ── Stage 2: runtime ──────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 WORKDIR /app
 
 RUN apk add --no-cache tini wget
